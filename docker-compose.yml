@@ -33,10 +33,13 @@ services:
       - TARGET_EMAIL=operator1@financepro.ru
       - SMTP_SERVER=front
       - SMTP_PORT=25
+      - ATTACHMENTS_OUTPUT_DIR=/app/sent_attachments
     networks:
       - default
     depends_on:
       - front
+    volumes:
+      - "./sent_attachments:/app/sent_attachments"
     logging:
       driver: json-file
       options:
