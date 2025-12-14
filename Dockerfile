@@ -21,6 +21,11 @@ COPY legitimate_attachments ./legitimate_attachments
 RUN useradd -m -u 1000 attacker && \
     chown -R attacker:attacker /app
 
+# Создаем директорию для сохранения файлов и даем права пользователю
+RUN mkdir -p /app/sent_attachments && \
+    chown -R attacker:attacker /app/sent_attachments && \
+    chmod 755 /app/sent_attachments
+
 USER attacker
 
 # Переменные окружения
