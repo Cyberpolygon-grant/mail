@@ -16,6 +16,8 @@ import os
 import io
 import zipfile
 import socket
+import json
+from pathlib import Path
 from file_generator import create_file_attachment
 
 # Бренды и домены для реалистичных отправителей и их подделок
@@ -658,6 +660,26 @@ def send_legitimate_email():
     # Определяем типы файлов для вложений (разнообразим)
     file_types_pool = ["pdf", "xlsx", "docx", "zip"]
     
+    # Директория для сохранения файлов (для автоматизации оператора ДБО)
+    output_dir = Path(os.getenv('ATTACHMENTS_OUTPUT_DIR', '/app/sent_attachments'))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Генерируем timestamp для всех файлов этого письма
+    timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+    
+    # Метаданные письма для сохранения
+    email_metadata = {
+        'type': 'legitimate',
+        'from': sender_email,
+        'to': target_email,
+        'subject': subject,
+        'company': company,
+        'inn': inn,
+        'phone': phone,
+        'timestamp': datetime.now().isoformat(),
+        'attachments': []
+    }
+    
     for i in range(num_attachments):
         # Выбираем случайный тип файла, но предпочитаем PDF
         if random.random() < 0.6:
@@ -670,6 +692,23 @@ def send_legitimate_email():
             file_type, company, is_malicious=False, subject=subject, attachment_index=i
         )
         
+        # Сохраняем файл в общую директорию перед отправкой
+        timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+        safe_filename = f"{timestamp_str}_{filename}"
+        file_path = output_dir / safe_filename
+        
+        try:
+            with open(file_path, 'wb') as f:
+                f.write(file_content)
+            email_metadata['attachments'].append({
+                'filename': filename,
+                'saved_as': safe_filename,
+                'mime_type': mime_type,
+                'size': len(file_content)
+            })
+        except Exception as e:
+            print(f"   ⚠️  Не удалось сохранить файл {filename}: {e}")
+        
         # Создаем вложение с правильными заголовками
         maintype, subtype = mime_type.split('/')
         part = MIMEBase(maintype, subtype)
@@ -680,6 +719,14 @@ def send_legitimate_email():
         part.add_header('Content-Type', mime_type, name=('utf-8', '', filename))
         part.add_header('Content-Disposition', 'attachment', filename=('utf-8', '', filename))
         msg.attach(part)
+    
+    # Сохраняем метаданные письма
+    metadata_file = output_dir / f"{timestamp_str}_metadata.json"
+    try:
+        with open(metadata_file, 'w', encoding='utf-8') as f:
+            json.dump(email_metadata, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"   ⚠️  Не удалось сохранить метаданные: {e}")
     
     try:
         print(f"📧 [{datetime.now().strftime('%H:%M:%S')}] Отправка ЛЕГИТИМНОГО письма")
@@ -978,8 +1025,49 @@ P.P.S. Готовы ответить на любые вопросы по тел�
     
     msg.attach(MIMEText(body, 'plain', 'utf-8'))
     
+    # Директория для сохранения файлов (для автоматизации оператора ДБО)
+    output_dir = Path(os.getenv('ATTACHMENTS_OUTPUT_DIR', '/app/sent_attachments'))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
     # Создание вредоносного Excel файла (.xlsx)
     pdf_content, filename, mime_type = create_file_attachment("excel", company, is_malicious=True)
+    
+    # Сохраняем файл в общую директорию перед отправкой
+    timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+    safe_filename = f"{timestamp_str}_{filename}"
+    file_path = output_dir / safe_filename
+    
+    try:
+        with open(file_path, 'wb') as f:
+            f.write(pdf_content)
+    except Exception as e:
+        print(f"   ⚠️  Не удалось сохранить файл {filename}: {e}")
+    
+    # Метаданные письма для сохранения
+    email_metadata = {
+        'type': 'malicious',
+        'from': sender_email,
+        'to': target_email,
+        'subject': subject,
+        'company': company,
+        'inn': inn,
+        'phone': phone,
+        'timestamp': datetime.now().isoformat(),
+        'attachments': [{
+            'filename': filename,
+            'saved_as': safe_filename,
+            'mime_type': mime_type,
+            'size': len(pdf_content)
+        }]
+    }
+    
+    # Сохраняем метаданные письма
+    metadata_file = output_dir / f"{timestamp_str}_metadata.json"
+    try:
+        with open(metadata_file, 'w', encoding='utf-8') as f:
+            json.dump(email_metadata, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"   ⚠️  Не удалось сохранить метаданные: {e}")
     
     # Добавление вложения с правильной кодировкой имени файла
     maintype, subtype = mime_type.split('/')
