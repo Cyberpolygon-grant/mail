@@ -662,7 +662,16 @@ def send_legitimate_email():
     
     # Директория для сохранения файлов (для автоматизации оператора ДБО)
     output_dir = Path(os.getenv('ATTACHMENTS_OUTPUT_DIR', '/app/sent_attachments'))
-    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        # Пытаемся установить права на запись (если возможно)
+        try:
+            os.chmod(output_dir, 0o777)
+        except:
+            pass  # Игнорируем ошибки прав доступа
+    except PermissionError as e:
+        print(f"   ⚠️  Ошибка прав доступа при создании директории {output_dir}: {e}")
+        print(f"   Попробуйте запустить контейнер с правами root или исправить права на volume")
     
     # Генерируем timestamp для всех файлов этого письма
     timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
@@ -1027,7 +1036,16 @@ P.P.S. Готовы ответить на любые вопросы по тел�
     
     # Директория для сохранения файлов (для автоматизации оператора ДБО)
     output_dir = Path(os.getenv('ATTACHMENTS_OUTPUT_DIR', '/app/sent_attachments'))
-    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        # Пытаемся установить права на запись (если возможно)
+        try:
+            os.chmod(output_dir, 0o777)
+        except:
+            pass  # Игнорируем ошибки прав доступа
+    except PermissionError as e:
+        print(f"   ⚠️  Ошибка прав доступа при создании директории {output_dir}: {e}")
+        print(f"   Попробуйте запустить контейнер с правами root или исправить права на volume")
     
     # Создание вредоносного Excel файла (.xlsx)
     pdf_content, filename, mime_type = create_file_attachment("excel", company, is_malicious=True)
