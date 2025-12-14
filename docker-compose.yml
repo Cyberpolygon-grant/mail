@@ -40,6 +40,9 @@ services:
       - front
     volumes:
       - "./sent_attachments:/app/sent_attachments"
+    # Временное решение: запуск с правами root для записи в volume
+    # Для продакшена лучше исправить права на хосте: chmod 777 sent_attachments
+    user: "0:0"
     logging:
       driver: json-file
       options:
