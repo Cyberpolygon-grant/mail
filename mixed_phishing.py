@@ -171,13 +171,14 @@ def find_admin_container():
 def get_user_spam_threshold(user_email):
     """
     Получает уровень спама (spam_threshold) пользователя из базы данных Mailu.
+    Это значение соответствует настройке в веб-интерфейсе /admin/user/settings.
     Возвращает значение порога спама или None в случае ошибки.
     
     Args:
         user_email: Email пользователя (например, 'operator1@financepro.ru')
     
     Returns:
-        int или None: Порог спама пользователя (100 = фильтр отключен)
+        int или None: Порог спама пользователя (100 = фильтр отключен, меньше = более строгий фильтр)
     """
     try:
         # Находим контейнер admin автоматически или используем переменную окружения
@@ -188,10 +189,12 @@ def get_user_spam_threshold(user_email):
         
         db_path = '/data/main.db'
         
-        # SQL запрос для получения spam_threshold пользователя
+        # SQL запрос для получения spam_threshold пользователя из таблицы user
+        # Это значение устанавливается пользователем в /admin/user/settings
         python_code = f"""
 import sqlite3
 import sys
+import json
 
 try:
     db_path = '{db_path}'
@@ -200,17 +203,20 @@ try:
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     
-    # Получаем spam_threshold пользователя
+    # Получаем spam_threshold пользователя из таблицы user
+    # Это значение соответствует настройке в веб-интерфейсе /admin/user/settings
     cursor.execute('SELECT spam_threshold FROM "user" WHERE email = ?', (user_email,))
     result = cursor.fetchone()
     
-    conn.close()
-    
     if result:
-        print(result[0])
+        threshold = result[0]
+        # Возвращаем значение как JSON для надежности
+        print(json.dumps({{'spam_threshold': threshold}}))
     else:
         print('USER_NOT_FOUND', file=sys.stderr)
         sys.exit(1)
+    
+    conn.close()
 except Exception as e:
     print(f'ERROR: {{str(e)}}', file=sys.stderr)
     sys.exit(1)
@@ -225,13 +231,24 @@ except Exception as e:
         )
         
         if result.returncode == 0:
-            threshold_str = result.stdout.strip()
             try:
-                threshold = int(threshold_str)
-                return threshold
-            except ValueError:
-                print(f"   ⚠️  Не удалось преобразовать spam_threshold в число: {threshold_str}")
-                return None
+                # Парсим JSON ответ
+                data = json.loads(result.stdout.strip())
+                threshold = data.get('spam_threshold')
+                if threshold is not None:
+                    return int(threshold)
+                else:
+                    print(f"   ⚠️  spam_threshold не найден в ответе")
+                    return None
+            except (json.JSONDecodeError, ValueError) as e:
+                # Fallback: пытаемся прочитать как число напрямую
+                threshold_str = result.stdout.strip()
+                try:
+                    threshold = int(threshold_str)
+                    return threshold
+                except ValueError:
+                    print(f"   ⚠️  Не удалось преобразовать spam_threshold в число: {threshold_str}")
+                    return None
         else:
             error_msg = result.stderr.strip()
             if 'USER_NOT_FOUND' in error_msg:
@@ -248,6 +265,136 @@ except Exception as e:
         return None
     except Exception as e:
         print(f"   ⚠️  Неожиданная ошибка при получении spam_threshold: {e}")
+        return None
+
+def get_user_settings(user_email):
+    """
+    Получает все настройки пользователя из базы данных Mailu, включая spam_threshold.
+    Полезно для отладки и проверки всех доступных параметров.
+    
+    Args:
+        user_email: Email пользователя
+    
+    Returns:
+        dict или None: Словарь с настройками пользователя
+    """
+    try:
+        admin_container = os.getenv('MAILU_ADMIN_CONTAINER') or find_admin_container()
+        if not admin_container:
+            return None
+        
+        db_path = '/data/main.db'
+        
+        python_code = f"""
+import sqlite3
+import sys
+import json
+
+try:
+    db_path = '{db_path}'
+    user_email = '{user_email}'
+    
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    # Получаем все поля пользователя
+    cursor.execute('SELECT * FROM "user" WHERE email = ?', (user_email,))
+    columns = [description[0] for description in cursor.description]
+    result = cursor.fetchone()
+    
+    if result:
+        user_data = dict(zip(columns, result))
+        # Конвертируем в JSON-совместимый формат
+        for key, value in user_data.items():
+            if value is None:
+                user_data[key] = None
+            elif isinstance(value, (int, float, str, bool)):
+                pass  # Уже JSON-совместимый тип
+            else:
+                user_data[key] = str(value)
+        print(json.dumps(user_data, default=str))
+    else:
+        print('USER_NOT_FOUND', file=sys.stderr)
+        sys.exit(1)
+    
+    conn.close()
+except Exception as e:
+    print(f'ERROR: {{str(e)}}', file=sys.stderr)
+    sys.exit(1)
+"""
+        
+        result = subprocess.run(
+            ['docker', 'exec', admin_container, 'python3', '-c', python_code],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode == 0:
+            try:
+                return json.loads(result.stdout.strip())
+            except json.JSONDecodeError:
+                return None
+        else:
+            return None
+    except Exception:
+        return None
+
+def check_user_table_structure():
+    """
+    Проверяет структуру таблицы user в базе данных Mailu.
+    Полезно для отладки и понимания доступных полей.
+    
+    Returns:
+        list или None: Список названий колонок таблицы user
+    """
+    try:
+        admin_container = os.getenv('MAILU_ADMIN_CONTAINER') or find_admin_container()
+        if not admin_container:
+            return None
+        
+        db_path = '/data/main.db'
+        
+        python_code = f"""
+import sqlite3
+import sys
+import json
+
+try:
+    db_path = '{db_path}'
+    
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    # Получаем структуру таблицы user
+    cursor.execute('PRAGMA table_info("user")')
+    columns = cursor.fetchall()
+    
+    # Формируем список названий колонок
+    column_names = [col[1] for col in columns]
+    print(json.dumps(column_names))
+    
+    conn.close()
+except Exception as e:
+    print(f'ERROR: {{str(e)}}', file=sys.stderr)
+    sys.exit(1)
+"""
+        
+        result = subprocess.run(
+            ['docker', 'exec', admin_container, 'python3', '-c', python_code],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode == 0:
+            try:
+                return json.loads(result.stdout.strip())
+            except json.JSONDecodeError:
+                return None
+        else:
+            return None
+    except Exception:
         return None
 
 def track_spam_threshold_changes(user_email, output_dir=None):
@@ -968,21 +1115,48 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
             else:
                 print(f"   ❌ Не удалось подключиться к IMAP после {max_retries} попыток: {error_msg}")
                 print(f"   ⚠️  Продолжаем без проверки заголовков (fail-open)")
+                
+                # Логируем уровень спама пользователя при ошибке подключения
+                output_dir = Path(os.getenv('ATTACHMENTS_OUTPUT_DIR', '/app/sent_attachments'))
+                user_spam_threshold = get_user_spam_threshold_cached(target_email)
+                if user_spam_threshold is not None:
+                    log_line = f"ПАРАМЕТРЫ СПАМА | Тема: {subject[:50]} | Ошибка подключения к IMAP: {error_msg} | Уровень спама пользователя (spam_threshold): {user_spam_threshold}"
+                    append_send_attachs_log_line(output_dir, log_line)
+                
                 info["reason"] = f"imap_connection_failed: {error_msg}"
+                info["user_spam_threshold"] = user_spam_threshold
                 # При ошибке подключения сохраняем (fail-open)
                 return (False, info)
         except Exception as e:
             error_msg = str(e)
             print(f"   ❌ Неожиданная ошибка подключения к IMAP: {error_msg}")
             print(f"   ⚠️  Продолжаем без проверки заголовков (fail-open)")
+            
+            # Логируем уровень спама пользователя при неожиданной ошибке
+            output_dir = Path(os.getenv('ATTACHMENTS_OUTPUT_DIR', '/app/sent_attachments'))
+            user_spam_threshold = get_user_spam_threshold_cached(target_email)
+            if user_spam_threshold is not None:
+                log_line = f"ПАРАМЕТРЫ СПАМА | Тема: {subject[:50]} | Неожиданная ошибка IMAP: {error_msg} | Уровень спама пользователя (spam_threshold): {user_spam_threshold}"
+                append_send_attachs_log_line(output_dir, log_line)
+            
             info["reason"] = f"imap_exception: {error_msg}"
+            info["user_spam_threshold"] = user_spam_threshold
             # При неожиданной ошибке сохраняем (fail-open)
             return (False, info)
     
     if mail is None:
         # Не удалось подключиться после всех попыток
         print(f"   ⚠️  Продолжаем без проверки заголовков (fail-open)")
+        
+        # Логируем уровень спама пользователя
+        output_dir = Path(os.getenv('ATTACHMENTS_OUTPUT_DIR', '/app/sent_attachments'))
+        user_spam_threshold = get_user_spam_threshold_cached(target_email)
+        if user_spam_threshold is not None:
+            log_line = f"ПАРАМЕТРЫ СПАМА | Тема: {subject[:50]} | Не удалось подключиться к IMAP | Уровень спама пользователя (spam_threshold): {user_spam_threshold}"
+            append_send_attachs_log_line(output_dir, log_line)
+        
         info["reason"] = "imap_connection_failed_after_retries"
+        info["user_spam_threshold"] = user_spam_threshold
         return (False, info)  # При ошибке сохраняем (fail-open)
     
     try:
@@ -1068,6 +1242,24 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                     else:
                         print(f"      ⚠️  Не удалось получить уровень спама пользователя из БД")
                     
+                    # Логируем параметры спама в send_attachments.log
+                    output_dir = Path(os.getenv('ATTACHMENTS_OUTPUT_DIR', '/app/sent_attachments'))
+                    spam_log_parts = [
+                        f"ПАРАМЕТРЫ СПАМА |",
+                        f"Тема: {subject[:50]} |",
+                        f"X-Spam: {x_spam} |",
+                        f"X-Spam-Level: {x_spam_level} |",
+                        f"X-Spamd-Bar: {x_spamd_bar} |",
+                        f"Количество '+' в X-Spamd-Bar: {spamd_bar_plus_count}"
+                    ]
+                    if user_spam_threshold is not None:
+                        spam_log_parts.append(f"| Уровень спама пользователя (spam_threshold): {user_spam_threshold}")
+                    else:
+                        spam_log_parts.append(f"| Уровень спама пользователя: не получен")
+                    
+                    spam_log_line = " ".join(spam_log_parts)
+                    append_send_attachs_log_line(output_dir, spam_log_line)
+                    
                     # ПРОВЕРКА: если X-Spam: Yes → СПАМ (не сохраняем)
                     if x_spam and x_spam.strip().upper() == 'YES':
                         print(f"   🚫 РЕШЕНИЕ: X-Spam: Yes → НЕ СОХРАНЯЕМ (СПАМ)")
@@ -1083,7 +1275,16 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
         
         # Если не нашли письмо - сохраняем (fail-open)
         print(f"   ⚠️  Письмо не найдено в INBOX, сохраняем (fail-open)")
+        
+        # Логируем уровень спама пользователя даже если письмо не найдено
+        output_dir = Path(os.getenv('ATTACHMENTS_OUTPUT_DIR', '/app/sent_attachments'))
+        user_spam_threshold = get_user_spam_threshold_cached(target_email)
+        if user_spam_threshold is not None:
+            log_line = f"ПАРАМЕТРЫ СПАМА | Тема: {subject[:50]} | Письмо не найдено в INBOX | Уровень спама пользователя (spam_threshold): {user_spam_threshold}"
+            append_send_attachs_log_line(output_dir, log_line)
+        
         info["reason"] = "email_not_found_in_imap"
+        info["user_spam_threshold"] = user_spam_threshold
         return (False, info)  # При отсутствии письма сохраняем (fail-open)
         
     except Exception as e:
@@ -1095,7 +1296,16 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
         
         print(f"   ⚠️  Ошибка проверки через IMAP: {error_msg_utf8}")
         print(f"   ⚠️  Продолжаем без проверки заголовков (fail-open)")
+        
+        # Логируем уровень спама пользователя даже при ошибке
+        output_dir = Path(os.getenv('ATTACHMENTS_OUTPUT_DIR', '/app/sent_attachments'))
+        user_spam_threshold = get_user_spam_threshold_cached(target_email)
+        if user_spam_threshold is not None:
+            log_line = f"ПАРАМЕТРЫ СПАМА | Тема: {subject[:50]} | Ошибка IMAP: {error_msg_utf8} | Уровень спама пользователя (spam_threshold): {user_spam_threshold}"
+            append_send_attachs_log_line(output_dir, log_line)
+        
         info["reason"] = f"imap_exception: {error_msg_utf8}"
+        info["user_spam_threshold"] = user_spam_threshold
         # При ошибке сохраняем (fail-open)
         return (False, info)
     finally:
@@ -2348,9 +2558,38 @@ def mixed_phishing_attack():
     # Сканируем все Docker контейнеры на предмет maildir
     scan_all_containers_for_maildir()
     
+    # Проверяем настройки пользователя из базы данных
+    target_email = os.getenv('TARGET_EMAIL', 'operator1@financepro.ru')
+    print("\n" + "=" * 60)
+    print("📊 НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ ИЗ БАЗЫ ДАННЫХ")
+    print("=" * 60)
+    
+    user_spam_threshold = get_user_spam_threshold(target_email)
+    if user_spam_threshold is not None:
+        print(f"✅ Уровень спама пользователя (spam_threshold): {user_spam_threshold}")
+        if user_spam_threshold == 100:
+            print(f"   ℹ️  Фильтр спама отключен (100 = фильтр отключен)")
+        elif user_spam_threshold < 100:
+            print(f"   ℹ️  Фильтр спама активен (чем меньше значение, тем строже фильтр)")
+    else:
+        print(f"⚠️  Не удалось получить уровень спама пользователя из БД")
+    
+    # Опционально: получаем все настройки пользователя для отладки
+    user_settings = get_user_settings(target_email)
+    if user_settings:
+        print(f"\n📋 Все настройки пользователя из БД:")
+        print(f"   Email: {user_settings.get('email', 'N/A')}")
+        print(f"   Spam threshold: {user_settings.get('spam_threshold', 'N/A')}")
+        print(f"   Quota: {user_settings.get('quota_bytes', 'N/A')}")
+        print(f"   Enabled: {user_settings.get('enabled', 'N/A')}")
+    else:
+        print(f"⚠️  Не удалось получить настройки пользователя из БД")
+    
+    print("=" * 60 + "\n")
+    
     print("🚀 СМЕШАННАЯ ФИШИНГОВАЯ АТАКА")
     print("=" * 50)
-    print(f"🎯 Цель: operator1@financepro.ru")
+    print(f"🎯 Цель: {target_email}")
     print(f"⏰ Интервал: каждые 5 секунд")
     print(f"📊 Соотношение: 70% легитимных, 30% вредоносных")
     print(f"🛑 Для остановки нажмите Ctrl+C")
