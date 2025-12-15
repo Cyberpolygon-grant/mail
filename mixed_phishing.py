@@ -240,7 +240,7 @@ def find_admin_container():
 def get_user_spam_threshold(user_email):
     """
     Получает настройки спам-фильтра (spam_enabled и spam_threshold) пользователя из базы данных Mailu.
-    Это значение соответствует настройке в веб-интерфейсе /admin/user/settings.
+    Обращается напрямую к volume с базой данных.
     Возвращает словарь с настройками или None в случае ошибки.
     
     Args:
@@ -251,237 +251,79 @@ def get_user_spam_threshold(user_email):
         spam_threshold: Порог спама пользователя (100 = фильтр отключен, меньше = более строгий фильтр)
         spam_enabled: Включен ли спам-фильтр (True/False или None)
     """
-    # Проверяем, доступна ли БД напрямую (если том смонтирован)
+    # Прямой доступ к БД через volume
     # Согласно docker-compose.yml, контейнер admin монтирует /mailu/data:/data
     # Значит /data/main.db внутри контейнера = /mailu/data/main.db на хосте
     direct_db_paths = [
         os.getenv('MAILU_DB_PATH'),  # Пользовательский путь (приоритет)
         '/mailu/data/main.db',  # Путь из docker-compose.yml (admin volume: /mailu/data:/data)
-        '/var/lib/docker/volumes/mailu_data/_data/main.db',  # Docker volume (если используется named volume)
     ]
     
     # Пробуем прямой доступ к БД
     for db_path in direct_db_paths:
-        if db_path and os.path.exists(db_path):
-            try:
-                import sqlite3
-                conn = sqlite3.connect(db_path)
-                cursor = conn.cursor()
-                
-                # Проверяем структуру таблицы
-                cursor.execute('PRAGMA table_info("user")')
-                columns = cursor.fetchall()
-                column_names = [col[1] for col in columns]
-                
-                # Проверяем наличие полей
-                if 'spam_threshold' not in column_names or 'spam_enabled' not in column_names:
-                    conn.close()
-                    continue
-                
-                # Получаем значения
-                cursor.execute('SELECT spam_enabled, spam_threshold FROM "user" WHERE email = ?', (user_email,))
-                result = cursor.fetchone()
-                
-                if result:
-                    spam_enabled = result[0]
-                    spam_threshold = result[1]
-                    
-                    if spam_threshold is not None:
-                        try:
-                            spam_threshold = int(spam_threshold)
-                        except (ValueError, TypeError):
-                            spam_threshold = None
-                    
-                    conn.close()
-                    print(f"   ✅ Получено из БД (прямой доступ) для {user_email}: spam_enabled={spam_enabled}, spam_threshold={spam_threshold}")
-                    return {
-                        'spam_enabled': spam_enabled,
-                        'spam_threshold': spam_threshold
-                    }
-                else:
-                    conn.close()
-            except Exception as e:
-                # Продолжаем пробовать другие пути или Docker
+        if not db_path:
+            continue
+            
+        if not os.path.exists(db_path):
+            continue
+            
+        try:
+            import sqlite3
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            
+            # Проверяем структуру таблицы
+            cursor.execute('PRAGMA table_info("user")')
+            columns = cursor.fetchall()
+            column_names = [col[1] for col in columns]
+            
+            # Проверяем наличие полей
+            if 'spam_threshold' not in column_names or 'spam_enabled' not in column_names:
+                conn.close()
+                print(f"   ⚠️  Поля spam_threshold или spam_enabled не найдены в таблице user")
                 continue
-    
-    # Если прямой доступ не сработал, пробуем через Docker
-    try:
-        # Находим контейнер admin автоматически или используем переменную окружения
-        admin_container = os.getenv('MAILU_ADMIN_CONTAINER') or find_admin_container()
-        if not admin_container:
-            print(f"   ⚠️  Не удалось найти контейнер admin")
-            print(f"   💡 Установите переменную окружения MAILU_ADMIN_CONTAINER=mail_admin_1 или MAILU_DB_PATH для прямого доступа к БД")
-            return None
-        
-        db_path = '/data/main.db'
-        
-        # SQL запрос для получения spam_threshold пользователя из таблицы user
-        # Это значение устанавливается пользователем в /admin/user/settings
-        python_code = f"""
-import sqlite3
-import sys
-import json
-import os
-
-try:
-    db_path = '{db_path}'
-    user_email = '{user_email}'
-    
-    # Проверяем существование файла БД
-    if not os.path.exists(db_path):
-        print(f'DB_NOT_FOUND: {{db_path}}', file=sys.stderr)
-        sys.exit(1)
-    
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    
-    # Сначала проверяем структуру таблицы user
-    cursor.execute("PRAGMA table_info(\\"user\\")")
-    columns = cursor.fetchall()
-    column_names = [col[1] for col in columns]
-    
-    # Проверяем наличие полей spam_threshold и spam_enabled
-    missing_fields = []
-    if 'spam_threshold' not in column_names:
-        missing_fields.append('spam_threshold')
-    if 'spam_enabled' not in column_names:
-        missing_fields.append('spam_enabled')
-    
-    if missing_fields:
-        print(f'COLUMN_NOT_FOUND: {{", ".join(missing_fields)}}. Available columns: {{", ".join(column_names)}}', file=sys.stderr)
-        conn.close()
-        sys.exit(1)
-    
-    # Получаем spam_enabled и spam_threshold пользователя из таблицы user
-    # Это значение соответствует настройке в веб-интерфейсе /admin/user/settings
-    cursor.execute('SELECT spam_enabled, spam_threshold FROM "user" WHERE email = ?', (user_email,))
-    result = cursor.fetchone()
-    
-    if result:
-        spam_enabled = result[0]
-        spam_threshold = result[1]
-        
-        # Преобразуем spam_threshold в int, если он не None
-        if spam_threshold is not None:
-            try:
-                spam_threshold = int(spam_threshold)
-            except (ValueError, TypeError):
-                print(f'ERROR: Не удалось преобразовать spam_threshold в число: {{spam_threshold}}', file=sys.stderr)
-                sys.exit(1)
-        
-        # Возвращаем значения как JSON для надежности
-        result_dict = {{
-            'spam_enabled': spam_enabled,
-            'spam_threshold': spam_threshold
-        }}
-        print(json.dumps(result_dict))
-    else:
-        # Проверяем, существует ли пользователь вообще
-        cursor.execute('SELECT email FROM "user" WHERE email = ?', (user_email,))
-        user_exists = cursor.fetchone()
-        if not user_exists:
-            print('USER_NOT_FOUND', file=sys.stderr)
-        else:
-            print('SPAM_SETTINGS_NULL', file=sys.stderr)
-        sys.exit(1)
-    
-    conn.close()
-except Exception as e:
-    print(f'ERROR: {{str(e)}}', file=sys.stderr)
-    import traceback
-    traceback.print_exc(file=sys.stderr)
-    sys.exit(1)
-"""
-        
-        # Выполняем команду через docker exec
-        result = subprocess.run(
-            ['docker', 'exec', admin_container, 'python3', '-c', python_code],
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-        
-        if result.returncode == 0:
-            try:
-                # Парсим JSON ответ
-                output = result.stdout.strip()
-                if not output:
-                    print(f"   ⚠️  Пустой ответ от базы данных")
-                    return None
+            
+            # Получаем значения
+            cursor.execute('SELECT spam_enabled, spam_threshold FROM "user" WHERE email = ?', (user_email,))
+            result = cursor.fetchone()
+            
+            if result:
+                spam_enabled = result[0]
+                spam_threshold = result[1]
                 
-                data = json.loads(output)
-                spam_enabled = data.get('spam_enabled')
-                spam_threshold = data.get('spam_threshold')
-                
-                # Преобразуем spam_threshold в int, если он не None
                 if spam_threshold is not None:
                     try:
                         spam_threshold = int(spam_threshold)
                     except (ValueError, TypeError):
-                        print(f"   ⚠️  Не удалось преобразовать spam_threshold в число: {spam_threshold}")
                         spam_threshold = None
                 
-                # Отладочный вывод для проверки
+                conn.close()
                 print(f"   ✅ Получено из БД для {user_email}: spam_enabled={spam_enabled}, spam_threshold={spam_threshold}")
-                
-                # Возвращаем словарь с обоими полями
-                result_dict = {{
+                return {
                     'spam_enabled': spam_enabled,
                     'spam_threshold': spam_threshold
-                }}
-                return result_dict
-            except (json.JSONDecodeError, ValueError) as e:
-                print(f"   ⚠️  Ошибка парсинга JSON: {e}")
-                print(f"   ⚠️  Ответ: {result.stdout.strip()}")
-                return None
-        else:
-            error_msg = result.stderr.strip()
-            stdout_msg = result.stdout.strip()
-            
-            # Детальная диагностика ошибок
-            if 'USER_NOT_FOUND' in error_msg:
-                print(f"   ⚠️  Пользователь {user_email} не найден в базе данных")
-                print(f"   💡 Проверьте, что пользователь существует в Mailu")
-            elif 'DB_NOT_FOUND' in error_msg:
-                db_path_from_error = error_msg.split('DB_NOT_FOUND:')[1].strip() if 'DB_NOT_FOUND:' in error_msg else db_path
-                print(f"   ⚠️  База данных не найдена: {db_path_from_error}")
-                print(f"   💡 Проверьте путь к базе данных в контейнере {admin_container}")
-            elif 'COLUMN_NOT_FOUND' in error_msg:
-                print(f"   ⚠️  Поле spam_enabled или spam_threshold не найдено в таблице user")
-                if 'Available columns:' in error_msg:
-                    available = error_msg.split('Available columns:')[1].strip()
-                    print(f"   💡 Доступные колонки: {available}")
-                print(f"   💡 Возможно, используется другая версия Mailu с другой структурой БД")
-            elif 'SPAM_SETTINGS_NULL' in error_msg or 'SPAM_THRESHOLD_NULL' in error_msg:
-                print(f"   ⚠️  Пользователь найден, но spam_enabled или spam_threshold = NULL")
-                print(f"   💡 Значение не установлено, используйте значение по умолчанию")
-            elif 'ERROR:' in error_msg:
-                error_detail = error_msg.replace('ERROR:', '').strip()
-                print(f"   ⚠️  Ошибка выполнения SQL запроса: {error_detail}")
-                print(f"   💡 Проверьте доступность базы данных и структуру таблицы")
+                }
             else:
-                print(f"   ⚠️  Ошибка получения spam_enabled и spam_threshold")
-                print(f"   ⚠️  stderr: {error_msg}")
-                if stdout_msg:
-                    print(f"   ⚠️  stdout: {stdout_msg}")
-                print(f"   💡 Контейнер: {admin_container}, БД: {db_path}")
-            
-            return None
-            
-    except subprocess.TimeoutExpired:
-        print(f"   ⚠️  Таймаут при получении spam_enabled и spam_threshold из базы данных")
-        print(f"   💡 Проверьте доступность контейнера admin")
-        return None
-    except FileNotFoundError:
-        print(f"   ⚠️  Docker не найден или недоступен")
-        print(f"   💡 Убедитесь, что Docker запущен и доступен")
-        return None
-    except Exception as e:
-        print(f"   ⚠️  Неожиданная ошибка при получении spam_enabled и spam_threshold: {e}")
-        import traceback
-        print(f"   💡 Детали ошибки:")
-        traceback.print_exc()
-        return None
+                conn.close()
+                # Проверяем, существует ли пользователь вообще
+                cursor.execute('SELECT email FROM "user" WHERE email = ?', (user_email,))
+                user_exists = cursor.fetchone()
+                if not user_exists:
+                    print(f"   ⚠️  Пользователь {user_email} не найден в базе данных")
+                else:
+                    print(f"   ⚠️  Пользователь найден, но spam_enabled или spam_threshold = NULL")
+                return None
+        except Exception as e:
+            print(f"   ⚠️  Ошибка доступа к БД по пути {db_path}: {e}")
+            continue
+    
+    # Если ни один путь не сработал
+    print(f"   ⚠️  База данных не найдена. Проверьте пути:")
+    for db_path in direct_db_paths:
+        if db_path:
+            print(f"      - {db_path} {'✅ существует' if os.path.exists(db_path) else '❌ не существует'}")
+    print(f"   💡 Установите переменную окружения MAILU_DB_PATH для указания пути к БД")
+    return None
 
 def get_user_plus_count_threshold(user_email):
     """
