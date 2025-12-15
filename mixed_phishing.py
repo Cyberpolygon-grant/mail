@@ -4,6 +4,7 @@
 """
 
 import smtplib
+import imaplib
 import time
 import random
 from datetime import datetime
@@ -665,11 +666,10 @@ def check_email_spam_in_container(container_name, maildir_path, target_email, su
     
     return {'found': False, 'is_spam': False}
 
-def check_email_spam_after_send(target_email, subject, message_id=None, wait_seconds=8, msg=None):
+def check_email_spam_after_send(target_email, subject, message_id=None, wait_seconds=8):
     """
-    Проверка спама по заголовкам письма: X-Spam, X-Spam-Level, X-Spamd-Bar
+    Проверка спама по заголовкам письма через IMAP: X-Spam, X-Spam-Level, X-Spamd-Bar
     Если X-Spam: Yes → СПАМ (не сохраняем)
-    msg - объект письма с заголовками (если передан)
     """
     info = {
         "message_id": message_id,
@@ -681,8 +681,70 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
         "x_spamd_bar": None,
     }
     
-    # Если передан объект письма - проверяем заголовки из него
-    if msg is not None:
+    # Ждем обработки rspamd
+    time.sleep(wait_seconds)
+    
+    try:
+        # Параметры IMAP
+        imap_server = os.getenv('IMAP_SERVER', 'front')
+        imap_port = int(os.getenv('IMAP_PORT', '143'))
+        imap_user = target_email
+        imap_password = os.getenv('IMAP_PASSWORD', '1q2w#E$R')
+        
+        # Подключаемся к IMAP
+        print(f"   🔍 Подключение к IMAP {imap_server}:{imap_port}...")
+        mail = imaplib.IMAP4(imap_server, imap_port)
+        mail.login(imap_user, imap_password)
+        
+        # Выбираем INBOX
+        mail.select('INBOX')
+        
+        # Ищем письмо по Message-ID или теме
+        search_criteria = []
+        if message_id:
+            msgid_clean = message_id.strip().strip('<>')
+            search_criteria.append(f'HEADER Message-ID "{msgid_clean}"')
+        
+        if subject:
+            search_criteria.append(f'SUBJECT "{subject[:100]}"')
+        
+        if not search_criteria:
+            mail.logout()
+            info["reason"] = "no_search_criteria"
+            return (False, info)
+        
+        # Ищем письмо
+        search_query = ' OR '.join(search_criteria)
+        typ, data = mail.search(None, search_query)
+        
+        if typ != 'OK' or not data[0]:
+            mail.logout()
+            info["reason"] = "email_not_found_in_imap"
+            return (False, info)
+        
+        # Получаем ID писем
+        email_ids = data[0].split()
+        if not email_ids:
+            mail.logout()
+            info["reason"] = "email_not_found_in_imap"
+            return (False, info)
+        
+        # Берем самое последнее письмо (первое в списке)
+        email_id = email_ids[0]
+        
+        # Получаем заголовки письма
+        typ, msg_data = mail.fetch(email_id, '(RFC822.HEADER)')
+        
+        if typ != 'OK' or not msg_data:
+            mail.logout()
+            info["reason"] = "failed_to_fetch_headers"
+            return (False, info)
+        
+        # Парсим заголовки
+        header_data = msg_data[0][1]
+        msg = email.message_from_bytes(header_data)
+        
+        # Проверяем заголовки спама
         x_spam = msg.get('X-Spam', '').strip()
         x_spam_level = msg.get('X-Spam-Level', '').strip()
         x_spamd_bar = msg.get('X-Spamd-Bar', '').strip()
@@ -690,11 +752,14 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
         info["x_spam_header"] = x_spam
         info["x_spam_level"] = x_spam_level
         info["x_spamd_bar"] = x_spamd_bar
+        info["found_in"] = "imap_inbox"
         
-        print(f"   🔍 Проверка заголовков:")
+        print(f"   ✅ Письмо найдено через IMAP")
         print(f"      X-Spam: '{x_spam}'")
         print(f"      X-Spam-Level: '{x_spam_level}'")
         print(f"      X-Spamd-Bar: '{x_spamd_bar}'")
+        
+        mail.logout()
         
         # ПРОВЕРКА: если X-Spam: Yes → СПАМ
         if x_spam and x_spam.strip().upper() == 'YES':
@@ -705,10 +770,16 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
             print(f"   ✅ РЕШЕНИЕ: X-Spam != Yes → СОХРАНЯЕМ (НЕ СПАМ)")
             info["reason"] = "x_spam_no_or_missing"
             return (False, info)
-    
-    # Если объект письма не передан - fail-open (сохраняем)
-    info["reason"] = "no_message_object_provided"
-    return (False, info)
+        
+    except Exception as e:
+        print(f"   ⚠️  Ошибка проверки через IMAP: {e}")
+        info["reason"] = f"imap_exception: {e}"
+        try:
+            mail.logout()
+        except:
+            pass
+        # fail-open (сохраняем)
+        return (False, info)
 
 
 def wait_for_smtp_server(smtp_server, smtp_port, max_attempts=30, delay=2):
