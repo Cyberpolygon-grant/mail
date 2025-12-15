@@ -682,8 +682,10 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
     }
     
     # Ждем обработки rspamd и готовности IMAP сервера
-    print(f"   ⏳ Ожидание {wait_seconds} сек для обработки rspamd и готовности IMAP...")
-    time.sleep(wait_seconds)
+    # Увеличиваем время ожидания, чтобы письмо успело попасть в INBOX
+    wait_time = max(wait_seconds, 15)  # Минимум 15 секунд
+    print(f"   ⏳ Ожидание {wait_time} сек для обработки rspamd и готовности IMAP...")
+    time.sleep(wait_time)
     
     try:
         # Параметры IMAP
@@ -729,11 +731,11 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
             msgid_clean = message_id.strip().strip('<>')
             search_criteria.append(f'HEADER Message-ID "{msgid_clean}"')
         
-        # Если нет Message-ID, ищем недавние письма (за последний час)
+        # Если нет Message-ID, ищем недавние письма (за последние 3 часа)
         if not message_id:
             try:
                 import datetime
-                date_since = (datetime.datetime.now() - datetime.timedelta(hours=1)).strftime('%d-%b-%Y')
+                date_since = (datetime.datetime.now() - datetime.timedelta(hours=3)).strftime('%d-%b-%Y')
                 search_criteria.append(f'SINCE {date_since}')
             except:
                 pass
@@ -745,9 +747,11 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
         
         # Ищем письмо (запрос всегда в ASCII, безопасно)
         search_query = ' '.join(search_criteria) if len(search_criteria) == 1 else ' OR '.join(search_criteria)
+        print(f"   🔍 Поиск письма: {search_query}")
         typ, data = mail.search(None, search_query)
         
         if typ != 'OK' or not data[0]:
+            print(f"   ⚠️  Поиск не вернул результатов (typ={typ})")
             mail.logout()
             info["reason"] = "email_not_found_in_imap"
             return (False, info)
@@ -755,9 +759,12 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
         # Получаем ID писем
         email_ids = data[0].split()
         if not email_ids:
+            print(f"   ⚠️  Не найдено писем по запросу")
             mail.logout()
             info["reason"] = "email_not_found_in_imap"
             return (False, info)
+        
+        print(f"   📧 Найдено писем для проверки: {len(email_ids)}")
         
         # Если искали по Message-ID - берем первое найденное
         # Если искали по дате - нужно проверить каждое письмо по теме
@@ -810,15 +817,46 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                 
                 if match:
                     found_email_id = email_id
+                    print(f"   ✅ Письмо найдено по совпадению (Message-ID или тема)")
                     break
             except Exception:
                 # Пропускаем письма с ошибками обработки
                 continue
         
         if not found_email_id:
-            mail.logout()
-            info["reason"] = "email_not_found_in_imap"
-            return (False, info)
+            # Если не нашли по точному совпадению, пробуем взять самое последнее письмо
+            # (возможно письмо только что пришло и еще обрабатывается)
+            if email_ids:
+                print(f"   ⚠️  Точное совпадение не найдено, проверяю последнее письмо из {len(email_ids)} найденных...")
+                email_id = email_ids[-1]  # Берем самое последнее (новое)
+                typ, msg_data = mail.fetch(email_id, '(RFC822.HEADER)')
+                if typ == 'OK' and msg_data:
+                    header_data = msg_data[0][1]
+                    if isinstance(header_data, str):
+                        try:
+                            header_data = header_data.encode('latin-1')
+                        except:
+                            try:
+                                header_data = header_data.encode('utf-8')
+                            except:
+                                header_data = None
+                    if header_data:
+                        try:
+                            msg_temp = email.message_from_bytes(header_data)
+                            # Проверяем хотя бы по части Message-ID или времени
+                            if message_id:
+                                msg_msgid = (msg_temp.get('Message-ID', '') or '').strip().strip('<>')
+                                msgid_part = message_id.strip().strip('<>').split('@')[0] if '@' in message_id else ''
+                                if msgid_part and msgid_part in msg_msgid:
+                                    found_email_id = email_id
+                                    print(f"   ✅ Найдено по части Message-ID")
+                        except:
+                            pass
+            
+            if not found_email_id:
+                mail.logout()
+                info["reason"] = "email_not_found_in_imap"
+                return (False, info)
         
         email_id = found_email_id
         
