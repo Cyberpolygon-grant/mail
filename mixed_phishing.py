@@ -321,8 +321,28 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
         # Извлекаем локальную часть email (до @)
         local_part = target_email.split('@')[0] if '@' in target_email else target_email
         
-        # Путь к maildir пользователя
-        user_maildir = Path(mail_dir) / mail_domain / local_part
+        # Пробуем разные возможные пути к maildir пользователя
+        # Mailu может хранить maildir в разных местах в зависимости от версии и монтирования
+        possible_paths = [
+            Path(mail_dir) / mail_domain / local_part,  # Стандартный путь: /mailu/mail/domain/user
+            Path(mail_dir) / local_part,  # Альтернатива: /mailu/mail/user
+            Path('/mail') / mail_domain / local_part,  # Если монтируется как /mail (как в dovecot)
+            Path('/mail') / local_part,  # Альтернатива /mail/user
+        ]
+        
+        user_maildir = None
+        found_path = None
+        for path in possible_paths:
+            if path.exists() and path.is_dir():
+                user_maildir = path
+                found_path = path
+                print(f"   ✅ Maildir найден по пути: {path}")
+                break
+        
+        if not user_maildir:
+            # Используем стандартный путь для дальнейшей диагностики
+            user_maildir = Path(mail_dir) / mail_domain / local_part
+            found_path = None
         
         # ДИАГНОСТИКА: проверяем структуру maildir
         print(f"   🔍 ДИАГНОСТИКА maildir:")
@@ -335,6 +355,20 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
         # Проверяем существование директории
         if not user_maildir.exists():
             print(f"   ⚠️  Maildir не найден: {user_maildir}")
+            print(f"   🔍 Проверяю альтернативные пути...")
+            
+            # Проверяем все возможные пути
+            for path in possible_paths:
+                print(f"      Проверяю: {path} -> {'✅ существует' if path.exists() else '❌ не существует'}")
+                if path.exists():
+                    try:
+                        items = list(path.iterdir())
+                        print(f"         Содержимое ({len(items)} элементов):")
+                        for item in items[:10]:
+                            print(f"            - {item.name} ({'dir' if item.is_dir() else 'file'})")
+                    except Exception as e:
+                        print(f"         ⚠️  Ошибка чтения: {e}")
+            
             # Проверяем родительские директории
             if Path(mail_dir).exists():
                 print(f"      ✅ {mail_dir} существует")
@@ -349,10 +383,31 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                         print(f"         ⚠️  Ошибка чтения: {e}")
                 else:
                     print(f"      ❌ {domain_dir} НЕ существует")
+                    # Проверяем что есть в mail_dir
+                    try:
+                        items = list(Path(mail_dir).iterdir())
+                        print(f"      📁 Содержимое {mail_dir}:")
+                        for item in items[:20]:
+                            print(f"         - {item.name} ({'dir' if item.is_dir() else 'file'})")
+                    except Exception as e:
+                        print(f"         ⚠️  Ошибка чтения: {e}")
             else:
                 print(f"      ❌ {mail_dir} НЕ существует")
-            info["reason"] = "maildir_not_found"
-            return (False, info)
+                # Проверяем /mail
+                if Path('/mail').exists():
+                    print(f"      ✅ /mail существует")
+                    try:
+                        items = list(Path('/mail').iterdir())
+                        print(f"      📁 Содержимое /mail:")
+                        for item in items[:20]:
+                            print(f"         - {item.name} ({'dir' if item.is_dir() else 'file'})")
+                    except Exception as e:
+                        print(f"         ⚠️  Ошибка чтения: {e}")
+            
+            print(f"   ⚠️  Maildir не найден ни по одному из путей!")
+            print(f"   🚫 FAIL-CLOSED: Считаем письмо СПАМОМ (не сохраняем), чтобы не пропустить спам в автоматизацию")
+            info["reason"] = "maildir_not_found_fail_closed"
+            return (True, info)  # FAIL-CLOSED: если не можем проверить - лучше не сохранять
         
         # ДИАГНОСТИКА: выводим структуру maildir пользователя
         print(f"      📁 Структура {user_maildir}:")
