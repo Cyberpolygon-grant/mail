@@ -1542,10 +1542,67 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                 if match or (email_id == email_ids[-1]):
                     x_spam = email_message.get('X-Spam', '').strip()
                     x_spam_level = email_message.get('X-Spam-Level', '').strip()
-                    x_spamd_bar = email_message.get('X-Spamd-Bar', '').strip()
+                    
+                    # Получаем X-Spamd-Bar - формат: "+++++++" (только плюсы подряд)
+                    # Пробуем разные способы получения заголовка
+                    x_spamd_bar = ''
+                    x_spamd_bar_values = []
+                    
+                    # Способ 1: get_all() - получает все значения заголовка
+                    try:
+                        x_spamd_bar_values = email_message.get_all('X-Spamd-Bar', [])
+                    except:
+                        pass
+                    
+                    # Способ 2: get() - получает первое значение
+                    if not x_spamd_bar_values:
+                        try:
+                            x_spamd_bar_raw = email_message.get('X-Spamd-Bar', '')
+                            if x_spamd_bar_raw:
+                                x_spamd_bar_values = [x_spamd_bar_raw]
+                        except:
+                            pass
+                    
+                    # Способ 3: прямой доступ к заголовкам
+                    if not x_spamd_bar_values:
+                        try:
+                            if 'X-Spamd-Bar' in email_message:
+                                x_spamd_bar_values = [email_message['X-Spamd-Bar']]
+                        except:
+                            pass
+                    
+                    # Берем последнее значение (самое актуальное) или первое, если только одно
+                    if x_spamd_bar_values:
+                        # Преобразуем в строку и убираем пробелы по краям
+                        x_spamd_bar_raw = x_spamd_bar_values[-1]
+                        x_spamd_bar = str(x_spamd_bar_raw).strip()
                     
                     # Подсчитываем количество '+' в X-Spamd-Bar
-                    spamd_bar_plus_count = x_spamd_bar.count('+') if x_spamd_bar else 0
+                    # Формат: "+++++++" - просто плюсы подряд
+                    spamd_bar_plus_count = 0
+                    if x_spamd_bar:
+                        # Считаем все плюсы в строке
+                        spamd_bar_plus_count = x_spamd_bar.count('+')
+                        
+                        # Отладочный вывод для проверки
+                        print(f"      DEBUG: Все значения X-Spamd-Bar: {x_spamd_bar_values}")
+                        print(f"      DEBUG: Сырое значение (repr): {repr(x_spamd_bar_raw)}")
+                        print(f"      DEBUG: Обработанное значение: '{x_spamd_bar}' (длина: {len(x_spamd_bar)})")
+                        print(f"      DEBUG: Количество '+' в строке: {spamd_bar_plus_count}")
+                        
+                        # Проверяем каждый символ для отладки (если строка короткая)
+                        if len(x_spamd_bar) <= 30:
+                            chars = [c for c in x_spamd_bar]
+                            codes = [ord(c) for c in x_spamd_bar]
+                            print(f"      DEBUG: Символы: {chars}")
+                            print(f"      DEBUG: Коды символов: {codes}")
+                    
+                    # Если X-Spamd-Bar пустой или не найден, пробуем использовать X-Spam-Level
+                    if not x_spamd_bar and x_spam_level:
+                        # X-Spam-Level обычно содержит звездочки (например, "*******")
+                        # Считаем звездочки как эквивалент плюсов
+                        spamd_bar_plus_count = x_spam_level.count('*')
+                        print(f"      DEBUG: X-Spamd-Bar не найден, использован X-Spam-Level: '{x_spam_level}' → {spamd_bar_plus_count} звездочек")
                     
                     # Получаем настройки спам-фильтра пользователя из базы данных
                     user_spam_settings = get_user_spam_threshold_cached(target_email)
