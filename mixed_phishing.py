@@ -677,23 +677,82 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
         "found_path": None,
         "reason": None,
         "x_spam_header": None,
+        "maildir_path": None,
+        "diagnostics": [],
     }
+    
+    # Логируем в файл
+    output_dir = Path('/app/sent_attachments')
+    log_msg = lambda msg: append_send_attachs_log_line(output_dir, f"[SPAM_CHECK] {msg}")
     
     # Ждем обработки rspamd
     print(f"   ⏳ Ожидание {wait_seconds} сек для обработки rspamd...")
+    log_msg(f"Начало проверки спама для письма: subject='{subject}', message_id={message_id}")
     time.sleep(wait_seconds)
     
     try:
+        mail_dir = os.getenv('MAIL_DIR', '/mailu/mail')
         mail_domain = os.getenv('MAIL_DOMAIN', 'financepro.ru')
         local_part = target_email.split('@')[0] if '@' in target_email else target_email
         
-        # Путь к maildir пользователя
-        user_maildir = Path('/mailu/mail') / mail_domain / local_part
+        log_msg(f"Параметры: MAIL_DIR={mail_dir}, MAIL_DOMAIN={mail_domain}, local_part={local_part}")
         
-        print(f"   🔍 Ищу письмо в maildir: {user_maildir}")
+        # Пробуем все возможные пути к maildir
+        possible_paths = [
+            Path(mail_dir) / mail_domain / local_part,  # Стандартный путь
+            Path(mail_dir) / local_part,  # Альтернатива
+            Path('/mailu/mail') / mail_domain / local_part,  # Жестко заданный
+            Path('/mailu/mail') / local_part,  # Альтернатива
+            Path('/mail') / mail_domain / local_part,  # Альтернативный mount
+            Path('/mail') / local_part,  # Альтернатива
+        ]
         
-        if not user_maildir.exists():
-            print(f"   ⚠️  Maildir не найден: {user_maildir}")
+        user_maildir = None
+        for path in possible_paths:
+            if path.exists() and path.is_dir():
+                user_maildir = path
+                info["maildir_path"] = str(path)
+                print(f"   ✅ Maildir найден: {path}")
+                log_msg(f"Maildir найден по пути: {path}")
+                break
+        
+        if not user_maildir:
+            # Детальная диагностика
+            print(f"   ⚠️  Maildir не найден ни по одному из путей!")
+            log_msg(f"ОШИБКА: Maildir не найден!")
+            for path in possible_paths:
+                exists = path.exists()
+                is_dir = path.is_dir() if exists else False
+                print(f"      {path} -> {'✅ существует' if exists else '❌ не существует'} {'(dir)' if is_dir else ''}")
+                log_msg(f"  Проверен путь: {path} -> {'существует' if exists else 'НЕ существует'}")
+                info["diagnostics"].append(f"{path}: {'exists' if exists else 'not_found'}")
+            
+            # Проверяем родительские директории
+            if Path(mail_dir).exists():
+                print(f"      ✅ {mail_dir} существует")
+                log_msg(f"Родительская директория {mail_dir} существует")
+                domain_dir = Path(mail_dir) / mail_domain
+                if domain_dir.exists():
+                    print(f"      ✅ {domain_dir} существует")
+                    log_msg(f"Домен директория {domain_dir} существует")
+                    try:
+                        items = list(domain_dir.iterdir())
+                        print(f"      📁 Содержимое {domain_dir} ({len(items)} элементов):")
+                        log_msg(f"Содержимое {domain_dir}: {[item.name for item in items[:10]]}")
+                        for item in items[:10]:
+                            print(f"         - {item.name}")
+                    except Exception as e:
+                        print(f"      ⚠️  Ошибка чтения: {e}")
+                        log_msg(f"Ошибка чтения {domain_dir}: {e}")
+                else:
+                    print(f"      ❌ {domain_dir} НЕ существует")
+                    log_msg(f"Домен директория {domain_dir} НЕ существует")
+            else:
+                print(f"      ❌ {mail_dir} НЕ существует")
+                log_msg(f"Родительская директория {mail_dir} НЕ существует")
+            
+            print(f"   ⚠️  FAIL-OPEN: Не можем проверить спам, считаем что письмо НЕ спам (сохраняем)")
+            log_msg(f"FAIL-OPEN: Maildir не найден, письмо будет сохранено (не можем проверить спам)")
             info["reason"] = "user_maildir_not_found"
             return (False, info)
         
@@ -705,6 +764,7 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
             inbox_path = user_maildir / subdir
             if inbox_path.exists():
                 search_dirs.append(inbox_path)
+                log_msg(f"Добавлена директория для поиска: {inbox_path}")
         
         # Добавляем все папки (включая спам)
         try:
@@ -714,21 +774,26 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                         folder_path = item / subdir
                         if folder_path.exists():
                             search_dirs.append(folder_path)
-        except:
-            pass
+                            log_msg(f"Добавлена директория для поиска: {folder_path}")
+        except Exception as e:
+            log_msg(f"Ошибка при сканировании папок: {e}")
         
         print(f"   📁 Проверяю {len(search_dirs)} директорий...")
+        log_msg(f"Всего директорий для поиска: {len(search_dirs)}")
         
         current_time = time.time()
         subject_lower = (subject or "").lower()
         msgid_clean = message_id.strip().strip('<>') if message_id else None
         
+        files_checked = 0
         # Ищем письмо по Message-ID или теме
         for search_dir in search_dirs:
             try:
                 for email_file in search_dir.iterdir():
                     if not email_file.is_file():
                         continue
+                    
+                    files_checked += 1
                     
                     # Проверяем время модификации (за последние 20 минут)
                     try:
@@ -751,390 +816,64 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                             msg_msgid = (msg.get('Message-ID', '') or '').strip().strip('<>')
                             if msg_msgid == msgid_clean:
                                 match = True
+                                log_msg(f"Письмо найдено по Message-ID: {email_file}")
                         
                         # 2. По теме (fallback)
                         if not match and subject:
                             msg_subject = decode_mime_words(msg.get('Subject', '')).lower()
                             if subject_lower[:50] in msg_subject or msg_subject[:50] in subject_lower:
                                 match = True
+                                log_msg(f"Письмо найдено по теме: {email_file}")
                         
                         if match:
-                            # НАШЛИ ПИСЬМО! Проверяем заголовок X-Spam
+                            # НАШЛИ ПИСЬМО! Проверяем ТОЛЬКО заголовок X-Spam
                             x_spam = msg.get('X-Spam', '').strip()
                             info["x_spam_header"] = x_spam
                             info["found_path"] = str(email_file)
+                            info["found_in"] = "maildir"  # Не важно в какой папке
                             
-                            # Определяем в какой папке нашли
-                            if 'spam' in str(email_file).lower() or 'junk' in str(email_file).lower():
-                                info["found_in"] = "spam_folder"
-                            else:
-                                info["found_in"] = "inbox"
+                            # Получаем все заголовки для логирования
+                            all_headers = dict(msg.items())
+                            spam_headers = {k: v for k, v in all_headers.items() if 'spam' in k.lower()}
+                            log_msg(f"Найдено письмо: {email_file.name} в папке {search_dir}")
+                            log_msg(f"Все заголовки X-Spam*: {spam_headers}")
+                            log_msg(f"X-Spam заголовок: '{x_spam}'")
                             
                             print(f"   ✅ Письмо найдено: {email_file.name}")
+                            print(f"      Папка: {search_dir}")
                             print(f"      X-Spam заголовок: '{x_spam}'")
                             
-                            # ПРОСТАЯ ПРОВЕРКА: если X-Spam: Yes → СПАМ
+                            # ПРОВЕРКА ТОЛЬКО ПО ЗАГОЛОВКУ X-Spam
                             if x_spam and x_spam.strip().upper() == 'YES':
-                                print(f"   🚫 РЕШЕНИЕ: X-Spam: Yes → ПИСЬМО ЯВЛЯЕТСЯ СПАМОМ")
+                                print(f"   🚫 РЕШЕНИЕ: X-Spam: Yes → НЕ СОХРАНЯЕМ (СПАМ)")
+                                log_msg(f"РЕШЕНИЕ: X-Spam: Yes → НЕ СОХРАНЯЕМ для автоматизации оператора (СПАМ)")
                                 info["reason"] = "x_spam_yes"
                                 return (True, info)
                             else:
-                                print(f"   ✅ РЕШЕНИЕ: X-Spam != Yes → ПИСЬМО НЕ ЯВЛЯЕТСЯ СПАМОМ")
+                                print(f"   ✅ РЕШЕНИЕ: X-Spam != Yes → СОХРАНЯЕМ (НЕ СПАМ)")
+                                log_msg(f"РЕШЕНИЕ: X-Spam != Yes (значение: '{x_spam}') → СОХРАНЯЕМ для автоматизации оператора (НЕ СПАМ)")
                                 info["reason"] = "x_spam_no_or_missing"
                                 return (False, info)
                     except Exception as e:
+                        log_msg(f"Ошибка при чтении файла {email_file}: {e}")
                         continue
             except Exception as e:
+                log_msg(f"Ошибка при итерации по {search_dir}: {e}")
                 continue
         
-        print(f"   ⚠️  Письмо не найдено в maildir")
+        print(f"   ⚠️  Письмо не найдено в maildir (проверено файлов: {files_checked})")
+        log_msg(f"Письмо не найдено в maildir после проверки {files_checked} файлов")
         info["reason"] = "email_not_found"
         return (False, info)
         
     except Exception as e:
         print(f"   ⚠️  Ошибка проверки: {e}")
         import traceback
-        traceback.print_exc()
+        error_trace = traceback.format_exc()
+        print(error_trace)
+        log_msg(f"КРИТИЧЕСКАЯ ОШИБКА при проверке спама: {e}")
+        log_msg(f"Traceback: {error_trace}")
         info["reason"] = f"exception: {e}"
-        return (False, info)
-    
-    # Если через docker exec не нашли, пробуем локальный maildir
-    try:
-        # Настройки maildir
-        mail_dir = os.getenv('MAIL_DIR', '/mailu/mail')
-        mail_domain = os.getenv('MAIL_DOMAIN', 'financepro.ru')
-        
-        # Извлекаем локальную часть email (до @)
-        local_part = target_email.split('@')[0] if '@' in target_email else target_email
-        
-        # Пробуем разные возможные пути к maildir пользователя
-        # Mailu может хранить maildir в разных местах в зависимости от версии и монтирования
-        possible_paths = [
-            Path(mail_dir) / mail_domain / local_part,  # Стандартный путь: /mailu/mail/domain/user
-            Path(mail_dir) / local_part,  # Альтернатива: /mailu/mail/user
-            Path('/mail') / mail_domain / local_part,  # Если монтируется как /mail (как в dovecot)
-            Path('/mail') / local_part,  # Альтернатива /mail/user
-        ]
-        
-        user_maildir = None
-        found_path = None
-        for path in possible_paths:
-            if path.exists() and path.is_dir():
-                user_maildir = path
-                found_path = path
-                print(f"   ✅ Maildir найден по пути: {path}")
-                break
-        
-        if not user_maildir:
-            # Используем стандартный путь для дальнейшей диагностики
-            user_maildir = Path(mail_dir) / mail_domain / local_part
-            found_path = None
-        
-        # ДИАГНОСТИКА: проверяем структуру maildir
-        print(f"   🔍 ДИАГНОСТИКА maildir:")
-        print(f"      MAIL_DIR={mail_dir}")
-        print(f"      MAIL_DOMAIN={mail_domain}")
-        print(f"      local_part={local_part}")
-        print(f"      user_maildir={user_maildir}")
-        print(f"      user_maildir.exists()={user_maildir.exists()}")
-        
-        # Проверяем существование директории
-        if not user_maildir.exists():
-            print(f"   ⚠️  Maildir не найден: {user_maildir}")
-            print(f"   🔍 Проверяю альтернативные пути...")
-            
-            # Проверяем все возможные пути
-            for path in possible_paths:
-                print(f"      Проверяю: {path} -> {'✅ существует' if path.exists() else '❌ не существует'}")
-                if path.exists():
-                    try:
-                        items = list(path.iterdir())
-                        print(f"         Содержимое ({len(items)} элементов):")
-                        for item in items[:10]:
-                            print(f"            - {item.name} ({'dir' if item.is_dir() else 'file'})")
-                    except Exception as e:
-                        print(f"         ⚠️  Ошибка чтения: {e}")
-            
-            # Проверяем родительские директории
-            if Path(mail_dir).exists():
-                print(f"      ✅ {mail_dir} существует")
-                domain_dir = Path(mail_dir) / mail_domain
-                if domain_dir.exists():
-                    print(f"      ✅ {domain_dir} существует")
-                    print(f"      📁 Содержимое {domain_dir}:")
-                    try:
-                        for item in domain_dir.iterdir():
-                            print(f"         - {item.name} ({'dir' if item.is_dir() else 'file'})")
-                    except Exception as e:
-                        print(f"         ⚠️  Ошибка чтения: {e}")
-                else:
-                    print(f"      ❌ {domain_dir} НЕ существует")
-                    # Проверяем что есть в mail_dir
-                    try:
-                        items = list(Path(mail_dir).iterdir())
-                        print(f"      📁 Содержимое {mail_dir}:")
-                        for item in items[:20]:
-                            print(f"         - {item.name} ({'dir' if item.is_dir() else 'file'})")
-                    except Exception as e:
-                        print(f"         ⚠️  Ошибка чтения: {e}")
-            else:
-                print(f"      ❌ {mail_dir} НЕ существует")
-                # Проверяем /mail
-                if Path('/mail').exists():
-                    print(f"      ✅ /mail существует")
-                    try:
-                        items = list(Path('/mail').iterdir())
-                        print(f"      📁 Содержимое /mail:")
-                        for item in items[:20]:
-                            print(f"         - {item.name} ({'dir' if item.is_dir() else 'file'})")
-                    except Exception as e:
-                        print(f"         ⚠️  Ошибка чтения: {e}")
-            
-            print(f"   ⚠️  Maildir не найден ни по одному из путей!")
-            print(f"   ⚠️  FAIL-OPEN: Не можем проверить спам, считаем что письмо НЕ спам (сохраняем)")
-            print(f"   ⚠️  ВНИМАНИЕ: Проверка спама недоступна - все письма будут сохраняться!")
-            info["reason"] = "maildir_not_found_fail_open"
-            return (False, info)  # FAIL-OPEN: если не можем проверить - сохраняем (но логируем предупреждение)
-        
-        # ДИАГНОСТИКА: выводим структуру maildir пользователя
-        print(f"      📁 Структура {user_maildir}:")
-        try:
-            all_items = list(user_maildir.iterdir())
-            for item in sorted(all_items):
-                item_type = "DIR" if item.is_dir() else "FILE"
-                print(f"         {item_type}: {item.name}")
-                # Если это директория, показываем её содержимое
-                if item.is_dir():
-                    try:
-                        sub_items = list(item.iterdir())
-                        for sub in sub_items[:5]:  # Показываем первые 5 элементов
-                            print(f"            - {sub.name}")
-                        if len(sub_items) > 5:
-                            print(f"            ... и ещё {len(sub_items) - 5} элементов")
-                    except Exception as e:
-                        print(f"            ⚠️  Ошибка чтения: {e}")
-        except Exception as e:
-            print(f"      ⚠️  Ошибка чтения структуры: {e}")
-        
-        # Нормализуем Message-ID для сравнения
-        msgid_norm = None
-        if message_id:
-            msgid_norm = message_id.strip()
-
-        # Будем ждать/проверять некоторое время, т.к. письмо может сначала появиться в INBOX, а потом переехать в Spam
-        # Увеличиваем время ожидания до 20 секунд для надежности (rspamd может обрабатывать медленно)
-        total_wait = max(wait_seconds, 20)
-        deadline = time.time() + total_wait
-
-        subject_part = (subject or "")[:60].lower()
-
-        # Polling до deadline
-        iteration = 0
-        
-        def iter_recent_files(dir_path: Path, recent_seconds: int = 300):
-            """Ищет недавние файлы в директории"""
-            if not dir_path.exists():
-                return []
-            current_time = time.time()
-            files = []
-            try:
-                for p in dir_path.iterdir():
-                    if p.is_file():
-                        try:
-                            mtime = p.stat().st_mtime
-                            # Увеличиваем окно поиска до 5 минут для надежности
-                            if current_time - mtime < recent_seconds:
-                                files.append((p, mtime))
-                        except Exception:
-                            continue
-            except Exception as e:
-                # iteration доступна через замыкание
-                if iteration == 1:
-                    print(f"         ⚠️  Ошибка итерации {dir_path}: {e}")
-                return []
-            files.sort(key=lambda x: x[1], reverse=True)
-            return files
-
-        def message_matches(msg_obj):
-            # 1) Message-ID приоритетнее темы (нормализуем для сравнения)
-            if msgid_norm:
-                got = (msg_obj.get("Message-ID", "") or "").strip()
-                # Убираем угловые скобки для сравнения
-                got_clean = got.strip('<>')
-                msgid_clean = msgid_norm.strip('<>')
-                if got_clean == msgid_clean or got == msgid_norm:
-                    return True
-            # 2) fallback по теме (более гибкое сравнение)
-            if subject_part:
-                msg_subject = decode_mime_words(msg_obj.get('Subject', '')).lower()
-                # Проверяем совпадение начала темы или ключевых слов
-                if (subject_part in msg_subject or 
-                    msg_subject[:len(subject_part)] == subject_part or
-                    subject_part[:40] in msg_subject[:60]):
-                    return True
-            return False
-
-        def check_headers_for_spam(msg_obj):
-            spam_flag = msg_obj.get('X-Spam-Flag', '')
-            spam_status = msg_obj.get('X-Spam-Status', '')
-            spam_score = msg_obj.get('X-Spam-Score', '')
-            spam_level = msg_obj.get('X-Spam-Level', '')
-            spam_result = msg_obj.get('X-Spam', '')
-
-            info["spam_headers"] = {
-                "X-Spam-Flag": spam_flag,
-                "X-Spam-Status": spam_status,
-                "X-Spam-Score": spam_score,
-                "X-Spam-Level": spam_level,
-                "X-Spam": spam_result,
-            }
-
-            is_spam = False
-            if spam_flag and spam_flag.strip().lower() == 'yes':
-                is_spam = True
-            if spam_status and 'yes' in spam_status.lower():
-                is_spam = True
-            if spam_result and spam_result.strip().lower() == 'yes':
-                is_spam = True
-            if spam_score:
-                try:
-                    score_match = spam_score.split('/')[0].strip()
-                    score = float(score_match)
-                    if score > 5.0:
-                        is_spam = True
-                except Exception:
-                    pass
-            return is_spam
-
-        # Подготовим директории: сначала СПАМ-папки, потом INBOX
-        inbox_dirs = [user_maildir / 'new', user_maildir / 'cur']
-
-        spam_dirs = []
-        try:
-            # Ищем ВСЕ скрытые папки (начинающиеся с точки) - это могут быть системные папки Mailu/Dovecot
-            for sub in user_maildir.iterdir():
-                if sub.is_dir():
-                    name = sub.name
-                    low = name.lower()
-                    # Проверяем различные варианты названий спам-папок
-                    is_spam_folder = (
-                        name.startswith('.') and ('spam' in low or 'junk' in low) or
-                        low == 'spam' or low == 'junk' or
-                        low == '.spam' or low == '.junk' or
-                        'spam' in low or 'junk' in low
-                    )
-                    if is_spam_folder:
-                        new_dir = sub / 'new'
-                        cur_dir = sub / 'cur'
-                        if new_dir.exists() or cur_dir.exists():
-                            spam_dirs.extend([new_dir, cur_dir])
-                            print(f"      ✅ Найдена спам-папка: {sub.name} (new={new_dir.exists()}, cur={cur_dir.exists()})")
-                        else:
-                            # Если нет new/cur, возможно это плоская структура - проверяем саму папку
-                            spam_dirs.append(sub)
-                            print(f"      ✅ Найдена спам-папка (плоская): {sub.name}")
-        except Exception as e:
-            print(f"      ⚠️  Ошибка поиска спам-папок: {e}")
-            import traceback
-            traceback.print_exc()
-        
-        print(f"   ⏳ Проверка maildir (ищу по Message-ID/теме) в: {user_maildir}")
-        print(f"      INBOX dirs: {[str(d) for d in inbox_dirs]}")
-        print(f"      SPAM dirs: {[str(d) for d in spam_dirs]}")
-        if msgid_norm:
-            print(f"      Message-ID: {msgid_norm}")
-        print(f"      Subject (для поиска): {subject_part[:50]}")
-
-        # Polling до deadline
-        while True:
-            iteration += 1
-            if iteration == 1:
-                print(f"   🔄 Итерация {iteration}: начинаю поиск...")
-            
-            # 1) Проверяем спам-папки (если письмо там — сразу СПАМ)
-            for d in spam_dirs:
-                if not d.exists():
-                    continue
-                recent = iter_recent_files(d)
-                if iteration == 1:
-                    print(f"      📁 Проверяю спам-папку {d}: найдено {len(recent)} недавних файлов")
-                for email_file, _ in recent:
-                    try:
-                        with open(email_file, 'rb') as f:
-                            msg = email.message_from_bytes(f.read())
-                        msg_id_got = (msg.get("Message-ID", "") or "").strip()
-                        msg_subject_got = decode_mime_words(msg.get('Subject', '')).lower()
-                        if iteration == 1:
-                            print(f"         Проверяю файл {email_file.name}:")
-                            print(f"            Message-ID: {msg_id_got[:60] if msg_id_got else '(нет)'}")
-                            print(f"            Subject: {msg_subject_got[:60]}")
-                        if message_matches(msg):
-                            info["found_in"] = "spam_folder"
-                            info["found_path"] = str(email_file)
-                            info["reason"] = "found_in_spam_folder"
-                            print(f"   🚫 Найдено в СПАМ-папке: {email_file}")
-                            return (True, info)
-                    except Exception as e:
-                        if iteration == 1:
-                            print(f"         ⚠️  Ошибка чтения {email_file.name}: {e}")
-                        continue
-
-            # 2) Проверяем INBOX — если письмо там, смотрим заголовки
-            for d in inbox_dirs:
-                if not d.exists():
-                    if iteration == 1:
-                        print(f"      ⚠️  INBOX dir не существует: {d}")
-                    continue
-                recent = iter_recent_files(d)
-                if iteration == 1:
-                    print(f"      📁 Проверяю INBOX {d}: найдено {len(recent)} недавних файлов")
-                for email_file, _ in recent:
-                    try:
-                        with open(email_file, 'rb') as f:
-                            msg = email.message_from_bytes(f.read())
-                        msg_id_got = (msg.get("Message-ID", "") or "").strip()
-                        msg_subject_got = decode_mime_words(msg.get('Subject', '')).lower()
-                        if iteration == 1:
-                            print(f"         Проверяю файл {email_file.name}:")
-                            print(f"            Message-ID: {msg_id_got[:60] if msg_id_got else '(нет)'}")
-                            print(f"            Subject: {msg_subject_got[:60]}")
-                        if message_matches(msg):
-                            info["found_in"] = "inbox"
-                            info["found_path"] = str(email_file)
-                            is_spam = check_headers_for_spam(msg)
-                            if is_spam:
-                                info["reason"] = "spam_headers_in_inbox"
-                                print(f"   🚫 Найдено в INBOX, заголовки говорят СПАМ: {email_file}")
-                                return (True, info)
-                            info["reason"] = "found_in_inbox_not_spam"
-                            print(f"   ✅ Найдено в INBOX, не спам по заголовкам: {email_file}")
-                            return (False, info)
-                    except Exception as e:
-                        if iteration == 1:
-                            print(f"         ⚠️  Ошибка чтения {email_file.name}: {e}")
-                        continue
-
-            if time.time() >= deadline:
-                break
-            # Проверяем каждую секунду, но выводим прогресс каждые 3 секунды
-            if iteration % 3 == 0 and iteration > 1:
-                elapsed = total_wait - (deadline - time.time())
-                print(f"   ⏳ Поиск продолжается... ({int(elapsed)}/{total_wait} сек)")
-            time.sleep(1)
-
-        print(f"   ⚠️  Письмо не найдено в maildir (INBOX/Spam) за {total_wait} сек")
-        print(f"   ⚠️  FAIL-OPEN: Не можем найти письмо, считаем что НЕ спам (сохраняем)")
-        print(f"   ⚠️  ВНИМАНИЕ: Письмо не найдено - будет сохранено без проверки спама!")
-        info["reason"] = "not_found_fail_open"
-        return (False, info)  # FAIL-OPEN: если не можем найти - сохраняем
-        
-    except Exception as e:
-        print(f"   ⚠️  Ошибка проверки спама через maildir: {e}")
-        import traceback
-        traceback.print_exc()
-        info["reason"] = f"exception: {e}"
-        print(f"   ⚠️  FAIL-OPEN: Ошибка проверки, считаем что НЕ спам (сохраняем)")
-        # fail-open: если проверка сломалась - сохраняем (но логируем ошибку)
         return (False, info)
 
 
