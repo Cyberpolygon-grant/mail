@@ -52,6 +52,8 @@ services:
       - "./sent_attachments:/app/sent_attachments"
       # Монтируем maildir для проверки папки Spam
       - "/mailu/mail:/mailu/mail:ro"
+      # Монтируем data для прямого доступа к базе данных
+      - "/mailu/data:/mailu/data:ro"
     # Временное решение: запуск с правами root для записи в volume
     # Для продакшена лучше исправить права на хосте: chmod 777 sent_attachments
     user: "0:0"
