@@ -665,10 +665,11 @@ def check_email_spam_in_container(container_name, maildir_path, target_email, su
     
     return {'found': False, 'is_spam': False}
 
-def check_email_spam_after_send(target_email, subject, message_id=None, wait_seconds=8):
+def check_email_spam_after_send(target_email, subject, message_id=None, wait_seconds=8, msg=None):
     """
     Проверка спама по заголовкам письма: X-Spam, X-Spam-Level, X-Spamd-Bar
     Если X-Spam: Yes → СПАМ (не сохраняем)
+    msg - объект письма с заголовками (если передан)
     """
     info = {
         "message_id": message_id,
@@ -680,128 +681,34 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
         "x_spamd_bar": None,
     }
     
-    # Ждем обработки rspamd
-    time.sleep(wait_seconds)
-    
-    try:
-        mail_dir = os.getenv('MAIL_DIR', '/mailu/mail')
-        mail_domain = os.getenv('MAIL_DOMAIN', 'financepro.ru')
-        local_part = target_email.split('@')[0] if '@' in target_email else target_email
+    # Если передан объект письма - проверяем заголовки из него
+    if msg is not None:
+        x_spam = msg.get('X-Spam', '').strip()
+        x_spam_level = msg.get('X-Spam-Level', '').strip()
+        x_spamd_bar = msg.get('X-Spamd-Bar', '').strip()
         
-        # Пробуем все возможные пути к maildir
-        possible_paths = [
-            Path(mail_dir) / mail_domain / local_part,
-            Path(mail_dir) / local_part,
-            Path('/mailu/mail') / mail_domain / local_part,
-            Path('/mailu/mail') / local_part,
-            Path('/mail') / mail_domain / local_part,
-            Path('/mail') / local_part,
-        ]
+        info["x_spam_header"] = x_spam
+        info["x_spam_level"] = x_spam_level
+        info["x_spamd_bar"] = x_spamd_bar
         
-        user_maildir = None
-        for path in possible_paths:
-            if path.exists() and path.is_dir():
-                user_maildir = path
-                break
+        print(f"   🔍 Проверка заголовков:")
+        print(f"      X-Spam: '{x_spam}'")
+        print(f"      X-Spam-Level: '{x_spam_level}'")
+        print(f"      X-Spamd-Bar: '{x_spamd_bar}'")
         
-        if not user_maildir:
-            info["reason"] = "user_maildir_not_found"
+        # ПРОВЕРКА: если X-Spam: Yes → СПАМ
+        if x_spam and x_spam.strip().upper() == 'YES':
+            print(f"   🚫 РЕШЕНИЕ: X-Spam: Yes → НЕ СОХРАНЯЕМ (СПАМ)")
+            info["reason"] = "x_spam_yes"
+            return (True, info)
+        else:
+            print(f"   ✅ РЕШЕНИЕ: X-Spam != Yes → СОХРАНЯЕМ (НЕ СПАМ)")
+            info["reason"] = "x_spam_no_or_missing"
             return (False, info)
-        
-        # Ищем письмо во всех подпапках
-        search_dirs = []
-        for subdir in ['new', 'cur']:
-            inbox_path = user_maildir / subdir
-            if inbox_path.exists():
-                search_dirs.append(inbox_path)
-        
-        try:
-            for item in user_maildir.iterdir():
-                if item.is_dir():
-                    for subdir in ['new', 'cur']:
-                        folder_path = item / subdir
-                        if folder_path.exists():
-                            search_dirs.append(folder_path)
-        except:
-            pass
-        
-        current_time = time.time()
-        subject_lower = (subject or "").lower()
-        msgid_clean = message_id.strip().strip('<>') if message_id else None
-        
-        # Ищем письмо по Message-ID или теме
-        for search_dir in search_dirs:
-            try:
-                for email_file in search_dir.iterdir():
-                    if not email_file.is_file():
-                        continue
-                    
-                    # Проверяем время модификации (за последние 20 минут)
-                    try:
-                        file_mtime = email_file.stat().st_mtime
-                        if current_time - file_mtime > 1200:  # 20 минут
-                            continue
-                    except:
-                        continue
-                    
-                    # Читаем файл и парсим заголовки
-                    try:
-                        with open(email_file, 'rb') as f:
-                            msg = email.message_from_bytes(f.read())
-                        
-                        # Проверяем совпадение письма
-                        match = False
-                        
-                        # 1. По Message-ID (приоритет)
-                        if msgid_clean:
-                            msg_msgid = (msg.get('Message-ID', '') or '').strip().strip('<>')
-                            if msg_msgid == msgid_clean:
-                                match = True
-                        
-                        # 2. По теме (fallback)
-                        if not match and subject:
-                            msg_subject = decode_mime_words(msg.get('Subject', '')).lower()
-                            if subject_lower[:50] in msg_subject or msg_subject[:50] in subject_lower:
-                                match = True
-                        
-                        if match:
-                            # НАШЛИ ПИСЬМО! Проверяем заголовки спама
-                            x_spam = msg.get('X-Spam', '').strip()
-                            x_spam_level = msg.get('X-Spam-Level', '').strip()
-                            x_spamd_bar = msg.get('X-Spamd-Bar', '').strip()
-                            
-                            info["x_spam_header"] = x_spam
-                            info["x_spam_level"] = x_spam_level
-                            info["x_spamd_bar"] = x_spamd_bar
-                            info["found_path"] = str(email_file)
-                            
-                            print(f"   ✅ Письмо найдено")
-                            print(f"      X-Spam: '{x_spam}'")
-                            print(f"      X-Spam-Level: '{x_spam_level}'")
-                            print(f"      X-Spamd-Bar: '{x_spamd_bar}'")
-                            
-                            # ПРОВЕРКА: если X-Spam: Yes → СПАМ
-                            if x_spam and x_spam.strip().upper() == 'YES':
-                                print(f"   🚫 РЕШЕНИЕ: X-Spam: Yes → НЕ СОХРАНЯЕМ (СПАМ)")
-                                info["reason"] = "x_spam_yes"
-                                return (True, info)
-                            else:
-                                print(f"   ✅ РЕШЕНИЕ: X-Spam != Yes → СОХРАНЯЕМ (НЕ СПАМ)")
-                                info["reason"] = "x_spam_no_or_missing"
-                                return (False, info)
-                    except Exception as e:
-                        continue
-            except Exception as e:
-                continue
-        
-        # Письмо не найдено - fail-open (сохраняем)
-        info["reason"] = "email_not_found"
-        return (False, info)
-        
-    except Exception as e:
-        # Ошибка - fail-open (сохраняем)
-        info["reason"] = f"exception: {e}"
-        return (False, info)
+    
+    # Если объект письма не передан - fail-open (сохраняем)
+    info["reason"] = "no_message_object_provided"
+    return (False, info)
 
 
 def wait_for_smtp_server(smtp_server, smtp_port, max_attempts=30, delay=2):
