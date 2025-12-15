@@ -721,14 +721,25 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
         # Выбираем INBOX
         mail.select('INBOX')
         
-        # Ищем письмо по Message-ID или теме
+        # Ищем письмо по Message-ID (приоритет) или теме
         search_criteria = []
+        
+        # Message-ID - самый надежный способ поиска (всегда ASCII)
         if message_id:
             msgid_clean = message_id.strip().strip('<>')
             search_criteria.append(f'HEADER Message-ID "{msgid_clean}"')
         
-        if subject:
-            search_criteria.append(f'SUBJECT "{subject[:100]}"')
+        # Поиск по теме (только если нет Message-ID или как fallback)
+        if subject and not message_id:
+            # Для темы с кириллицей: пробуем найти недавние письма и проверить тему вручную
+            # Используем поиск по дате (последние письма)
+            try:
+                # Ищем письма за последний час
+                import datetime
+                date_since = (datetime.datetime.now() - datetime.timedelta(hours=1)).strftime('%d-%b-%Y')
+                search_criteria.append(f'SINCE {date_since}')
+            except:
+                pass
         
         if not search_criteria:
             mail.logout()
@@ -736,7 +747,7 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
             return (False, info)
         
         # Ищем письмо
-        search_query = ' OR '.join(search_criteria)
+        search_query = ' '.join(search_criteria) if len(search_criteria) == 1 else ' OR '.join(search_criteria)
         typ, data = mail.search(None, search_query)
         
         if typ != 'OK' or not data[0]:
@@ -751,8 +762,48 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
             info["reason"] = "email_not_found_in_imap"
             return (False, info)
         
-        # Берем самое последнее письмо (первое в списке)
-        email_id = email_ids[0]
+        # Если искали по Message-ID - берем первое найденное
+        # Если искали по дате - нужно проверить каждое письмо по теме
+        found_email_id = None
+        subject_lower = (subject or "").lower()
+        msgid_clean = message_id.strip().strip('<>') if message_id else None
+        
+        for email_id in email_ids:
+            # Получаем заголовки для проверки
+            typ, msg_data = mail.fetch(email_id, '(RFC822.HEADER)')
+            if typ != 'OK' or not msg_data:
+                continue
+            
+            header_data = msg_data[0][1]
+            if isinstance(header_data, str):
+                header_data = header_data.encode('utf-8')
+            msg_temp = email.message_from_bytes(header_data)
+            
+            # Проверяем совпадение
+            match = False
+            
+            # По Message-ID (точное совпадение)
+            if msgid_clean:
+                msg_msgid = (msg_temp.get('Message-ID', '') or '').strip().strip('<>')
+                if msg_msgid == msgid_clean:
+                    match = True
+            
+            # По теме (если нет Message-ID)
+            if not match and subject:
+                msg_subject = decode_mime_words(msg_temp.get('Subject', '')).lower()
+                if subject_lower[:50] in msg_subject or msg_subject[:50] in subject_lower:
+                    match = True
+            
+            if match:
+                found_email_id = email_id
+                break
+        
+        if not found_email_id:
+            mail.logout()
+            info["reason"] = "email_not_found_in_imap"
+            return (False, info)
+        
+        email_id = found_email_id
         
         # Получаем заголовки письма
         typ, msg_data = mail.fetch(email_id, '(RFC822.HEADER)')
@@ -764,6 +815,9 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
         
         # Парсим заголовки
         header_data = msg_data[0][1]
+        # Убеждаемся, что данные в bytes
+        if isinstance(header_data, str):
+            header_data = header_data.encode('utf-8')
         msg = email.message_from_bytes(header_data)
         
         # Проверяем заголовки спама
