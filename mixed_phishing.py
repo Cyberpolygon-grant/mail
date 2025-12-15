@@ -251,12 +251,66 @@ def get_user_spam_threshold(user_email):
         spam_threshold: Порог спама пользователя (100 = фильтр отключен, меньше = более строгий фильтр)
         spam_enabled: Включен ли спам-фильтр (True/False или None)
     """
+    # Проверяем, доступна ли БД напрямую (если том смонтирован)
+    # Согласно docker-compose.yml, контейнер admin монтирует /mailu/data:/data
+    # Значит /data/main.db внутри контейнера = /mailu/data/main.db на хосте
+    direct_db_paths = [
+        os.getenv('MAILU_DB_PATH'),  # Пользовательский путь (приоритет)
+        '/mailu/data/main.db',  # Путь из docker-compose.yml (admin volume: /mailu/data:/data)
+        '/var/lib/docker/volumes/mailu_data/_data/main.db',  # Docker volume (если используется named volume)
+    ]
+    
+    # Пробуем прямой доступ к БД
+    for db_path in direct_db_paths:
+        if db_path and os.path.exists(db_path):
+            try:
+                import sqlite3
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                
+                # Проверяем структуру таблицы
+                cursor.execute('PRAGMA table_info("user")')
+                columns = cursor.fetchall()
+                column_names = [col[1] for col in columns]
+                
+                # Проверяем наличие полей
+                if 'spam_threshold' not in column_names or 'spam_enabled' not in column_names:
+                    conn.close()
+                    continue
+                
+                # Получаем значения
+                cursor.execute('SELECT spam_enabled, spam_threshold FROM "user" WHERE email = ?', (user_email,))
+                result = cursor.fetchone()
+                
+                if result:
+                    spam_enabled = result[0]
+                    spam_threshold = result[1]
+                    
+                    if spam_threshold is not None:
+                        try:
+                            spam_threshold = int(spam_threshold)
+                        except (ValueError, TypeError):
+                            spam_threshold = None
+                    
+                    conn.close()
+                    print(f"   ✅ Получено из БД (прямой доступ) для {user_email}: spam_enabled={spam_enabled}, spam_threshold={spam_threshold}")
+                    return {
+                        'spam_enabled': spam_enabled,
+                        'spam_threshold': spam_threshold
+                    }
+                else:
+                    conn.close()
+            except Exception as e:
+                # Продолжаем пробовать другие пути или Docker
+                continue
+    
+    # Если прямой доступ не сработал, пробуем через Docker
     try:
         # Находим контейнер admin автоматически или используем переменную окружения
         admin_container = os.getenv('MAILU_ADMIN_CONTAINER') or find_admin_container()
         if not admin_container:
             print(f"   ⚠️  Не удалось найти контейнер admin")
-            print(f"   💡 Установите переменную окружения MAILU_ADMIN_CONTAINER или убедитесь, что Docker запущен")
+            print(f"   💡 Установите переменную окружения MAILU_ADMIN_CONTAINER=mail_admin_1 или MAILU_DB_PATH для прямого доступа к БД")
             return None
         
         db_path = '/data/main.db'
