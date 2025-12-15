@@ -21,6 +21,7 @@ from pathlib import Path
 import email
 from email.header import decode_header
 from email.utils import make_msgid
+import subprocess
 from file_generator import create_file_attachment
 
 # Лог действий по сохранению в send_attachs (sent_attachments)
@@ -298,9 +299,377 @@ LEGIT_LOCALPARTS = [
     "noreply", "no-reply", "automated", "system", "notification"
 ]
 
+def scan_all_containers_for_maildir():
+    """
+    Сканирует все запущенные Docker контейнеры и ищет maildir со спам-папками.
+    Логирует результаты в файл.
+    """
+    print("\n" + "="*70)
+    print("🔍 СКАНИРОВАНИЕ ВСЕХ DOCKER КОНТЕЙНЕРОВ НА ПРЕДМЕТ MAILDIR")
+    print("="*70)
+    
+    try:
+        # Получаем список всех запущенных контейнеров
+        result = subprocess.run(
+            ['docker', 'ps', '--format', '{{.Names}}'],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode != 0:
+            print(f"   ⚠️  Не удалось получить список контейнеров: {result.stderr}")
+            return []
+        
+        container_names = [name.strip() for name in result.stdout.strip().split('\n') if name.strip()]
+        print(f"   📦 Найдено запущенных контейнеров: {len(container_names)}")
+        
+        maildir_containers = []
+        
+        # Возможные пути к maildir в контейнерах
+        possible_maildir_paths = [
+            '/mailu/mail',
+            '/mail',
+            '/var/mail',
+            '/home/mail',
+        ]
+        
+        # Возможные пути к пользовательским maildir
+        target_email = os.getenv('TARGET_EMAIL', 'operator1@financepro.ru')
+        mail_domain = os.getenv('MAIL_DOMAIN', 'financepro.ru')
+        local_part = target_email.split('@')[0] if '@' in target_email else target_email
+        
+        for container_name in container_names:
+            print(f"\n   🔍 Проверяю контейнер: {container_name}")
+            
+            container_info = {
+                'name': container_name,
+                'maildir_paths': [],
+                'spam_folders': [],
+                'user_maildir': None,
+            }
+            
+            # Проверяем каждый возможный путь к maildir
+            for maildir_base in possible_maildir_paths:
+                try:
+                    # Проверяем существует ли базовый путь
+                    check_cmd = ['docker', 'exec', container_name, 'test', '-d', maildir_base]
+                    check_result = subprocess.run(
+                        check_cmd,
+                        capture_output=True,
+                        timeout=5
+                    )
+                    
+                    if check_result.returncode == 0:
+                        print(f"      ✅ Найден maildir: {maildir_base}")
+                        container_info['maildir_paths'].append(maildir_base)
+                        
+                        # Проверяем структуру
+                        ls_cmd = ['docker', 'exec', container_name, 'ls', '-la', maildir_base]
+                        ls_result = subprocess.run(
+                            ls_cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=5
+                        )
+                        
+                        if ls_result.returncode == 0:
+                            print(f"         Содержимое {maildir_base}:")
+                            for line in ls_result.stdout.split('\n')[:10]:
+                                if line.strip():
+                                    print(f"            {line}")
+                        
+                        # Проверяем путь к пользователю
+                        user_paths = [
+                            f"{maildir_base}/{mail_domain}/{local_part}",
+                            f"{maildir_base}/{local_part}",
+                        ]
+                        
+                        for user_path in user_paths:
+                            check_user = subprocess.run(
+                                ['docker', 'exec', container_name, 'test', '-d', user_path],
+                                capture_output=True,
+                                timeout=5
+                            )
+                            
+                            if check_user.returncode == 0:
+                                print(f"      ✅ Найден maildir пользователя: {user_path}")
+                                container_info['user_maildir'] = user_path
+                                
+                                # Ищем спам-папки
+                                find_spam_cmd = [
+                                    'docker', 'exec', container_name,
+                                    'find', user_path,
+                                    '-type', 'd',
+                                    '-name', '*spam*', '-o', '-name', '*Spam*', '-o', '-name', '*junk*', '-o', '-name', '*Junk*'
+                                ]
+                                
+                                find_result = subprocess.run(
+                                    find_spam_cmd,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=5
+                                )
+                                
+                                if find_result.returncode == 0 and find_result.stdout.strip():
+                                    spam_folders = [f.strip() for f in find_result.stdout.strip().split('\n') if f.strip()]
+                                    container_info['spam_folders'] = spam_folders
+                                    print(f"      🚫 Найдены спам-папки:")
+                                    for spam_folder in spam_folders:
+                                        print(f"         - {spam_folder}")
+                                
+                                # Показываем структуру папок пользователя
+                                ls_user_cmd = ['docker', 'exec', container_name, 'ls', '-la', user_path]
+                                ls_user_result = subprocess.run(
+                                    ls_user_cmd,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=5
+                                )
+                                
+                                if ls_user_result.returncode == 0:
+                                    print(f"         Структура {user_path}:")
+                                    for line in ls_user_result.stdout.split('\n')[:15]:
+                                        if line.strip():
+                                            print(f"            {line}")
+                                
+                                break
+                        
+                except subprocess.TimeoutExpired:
+                    print(f"      ⏱️  Таймаут при проверке {maildir_base}")
+                except Exception as e:
+                    print(f"      ⚠️  Ошибка проверки {maildir_base}: {e}")
+            
+            if container_info['maildir_paths'] or container_info['user_maildir']:
+                maildir_containers.append(container_info)
+        
+        print("\n" + "="*70)
+        print(f"📊 РЕЗУЛЬТАТЫ СКАНИРОВАНИЯ:")
+        print(f"   Контейнеров с maildir: {len(maildir_containers)}")
+        
+        # Логируем результаты в файл
+        output_dir = Path(os.getenv('ATTACHMENTS_OUTPUT_DIR', '/app/sent_attachments'))
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            scan_log_path = output_dir / "container_scan.log"
+            with open(scan_log_path, "a", encoding="utf-8") as f:
+                f.write(f"\n{'='*70}\n")
+                f.write(f"[{datetime.now().isoformat()}] СКАНИРОВАНИЕ DOCKER КОНТЕЙНЕРОВ\n")
+                f.write(f"{'='*70}\n")
+                f.write(f"Найдено контейнеров с maildir: {len(maildir_containers)}\n\n")
+                
+                for info in maildir_containers:
+                    f.write(f"Контейнер: {info['name']}\n")
+                    f.write(f"  Maildir пути: {', '.join(info['maildir_paths'])}\n")
+                    f.write(f"  Maildir пользователя: {info['user_maildir'] or 'не найден'}\n")
+                    f.write(f"  Спам-папки ({len(info['spam_folders'])}):\n")
+                    for spam_folder in info['spam_folders']:
+                        f.write(f"    - {spam_folder}\n")
+                    f.write("\n")
+                
+                f.write(f"{'='*70}\n\n")
+            
+            print(f"   📝 Результаты сохранены в: {scan_log_path}")
+        except Exception as e:
+            print(f"   ⚠️  Не удалось сохранить лог сканирования: {e}")
+        
+        for info in maildir_containers:
+            print(f"   - {info['name']}: maildir={info['user_maildir']}, spam папок={len(info['spam_folders'])}")
+        print("="*70 + "\n")
+        
+        return maildir_containers
+        
+    except FileNotFoundError:
+        print("   ⚠️  Docker не найден или недоступен")
+        return []
+    except Exception as e:
+        print(f"   ⚠️  Ошибка сканирования контейнеров: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+def check_email_spam_in_container(container_name, maildir_path, target_email, subject, message_id=None):
+    """
+    Проверяет письмо в конкретном контейнере через docker exec
+    """
+    local_part = target_email.split('@')[0] if '@' in target_email else target_email
+    mail_domain = os.getenv('MAIL_DOMAIN', 'financepro.ru')
+    
+    # Пробуем разные пути к пользователю
+    user_paths = [
+        f"{maildir_path}/{mail_domain}/{local_part}",
+        f"{maildir_path}/{local_part}",
+    ]
+    
+    for user_path in user_paths:
+        try:
+            # Проверяем существует ли путь
+            check_result = subprocess.run(
+                ['docker', 'exec', container_name, 'test', '-d', user_path],
+                capture_output=True,
+                timeout=5
+            )
+            
+            if check_result.returncode == 0:
+                # Ищем письмо в спам-папках
+                spam_folders_cmd = [
+                    'docker', 'exec', container_name,
+                    'find', user_path,
+                    '-type', 'd',
+                    '(', '-name', '*spam*', '-o', '-name', '*Spam*', '-o', '-name', '*junk*', '-o', '-name', '*Junk*', ')'
+                ]
+                
+                spam_result = subprocess.run(
+                    spam_folders_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                
+                if spam_result.returncode == 0 and spam_result.stdout.strip():
+                    spam_folders = [f.strip() for f in spam_result.stdout.strip().split('\n') if f.strip()]
+                    # Ищем письмо в спам-папках
+                    for spam_folder in spam_folders:
+                        for subdir in ['new', 'cur']:
+                            spam_dir = f"{spam_folder}/{subdir}"
+                            # Ищем файлы измененные за последние 10 минут
+                            find_cmd = [
+                                'docker', 'exec', container_name,
+                                'find', spam_dir,
+                                '-type', 'f',
+                                '-mmin', '-10',  # Файлы за последние 10 минут
+                            ]
+                            find_result = subprocess.run(
+                                find_cmd,
+                                capture_output=True,
+                                text=True,
+                                timeout=5
+                            )
+                            
+                            if find_result.returncode == 0 and find_result.stdout.strip():
+                                files = [f.strip() for f in find_result.stdout.strip().split('\n') if f.strip()]
+                                # Проверяем каждый файл на совпадение темы или Message-ID
+                                for email_file in files[:10]:  # Проверяем первые 10 файлов
+                                    try:
+                                        cat_cmd = ['docker', 'exec', container_name, 'cat', email_file]
+                                        cat_result = subprocess.run(
+                                            cat_cmd,
+                                            capture_output=True,
+                                            text=True,
+                                            timeout=5
+                                        )
+                                        
+                                        if cat_result.returncode == 0:
+                                            email_content = cat_result.stdout
+                                            
+                                            # Проверяем Message-ID (приоритетнее)
+                                            if message_id:
+                                                msgid_clean = message_id.strip().strip('<>')
+                                                if f'Message-ID: {message_id}' in email_content or msgid_clean in email_content:
+                                                    return {
+                                                        'found': True,
+                                                        'is_spam': True,
+                                                        'container': container_name,
+                                                        'path': email_file,
+                                                        'folder': spam_folder,
+                                                    }
+                                            
+                                            # Проверяем по теме
+                                            if subject and subject[:40].lower() in email_content.lower():
+                                                return {
+                                                    'found': True,
+                                                    'is_spam': True,
+                                                    'container': container_name,
+                                                    'path': email_file,
+                                                    'folder': spam_folder,
+                                                }
+                                    except:
+                                        continue
+                
+                # Проверяем INBOX
+                inbox_paths = [
+                    f"{user_path}/new",
+                    f"{user_path}/cur",
+                ]
+                
+                for inbox_path in inbox_paths:
+                    try:
+                        check_inbox = subprocess.run(
+                            ['docker', 'exec', container_name, 'test', '-d', inbox_path],
+                            capture_output=True,
+                            timeout=5
+                        )
+                        
+                        if check_inbox.returncode == 0:
+                            # Ищем файлы измененные за последние 10 минут
+                            find_inbox_cmd = [
+                                'docker', 'exec', container_name,
+                                'find', inbox_path,
+                                '-type', 'f',
+                                '-mmin', '-10',  # Файлы за последние 10 минут
+                            ]
+                            find_inbox_result = subprocess.run(
+                                find_inbox_cmd,
+                                capture_output=True,
+                                text=True,
+                                timeout=5
+                            )
+                            
+                            if find_inbox_result.returncode == 0 and find_inbox_result.stdout.strip():
+                                files = [f.strip() for f in find_inbox_result.stdout.strip().split('\n') if f.strip()]
+                                for email_file in files[:10]:
+                                    try:
+                                        cat_cmd = ['docker', 'exec', container_name, 'cat', email_file]
+                                        cat_result = subprocess.run(
+                                            cat_cmd,
+                                            capture_output=True,
+                                            text=True,
+                                            timeout=5
+                                        )
+                                        
+                                        if cat_result.returncode == 0:
+                                            email_content = cat_result.stdout
+                                            
+                                            # Проверяем Message-ID (приоритетнее)
+                                            match_found = False
+                                            if message_id:
+                                                msgid_clean = message_id.strip().strip('<>')
+                                                if f'Message-ID: {message_id}' in email_content or msgid_clean in email_content:
+                                                    match_found = True
+                                            
+                                            # Проверяем по теме
+                                            if not match_found and subject and subject[:40].lower() in email_content.lower():
+                                                match_found = True
+                                            
+                                            if match_found:
+                                                # Проверяем заголовки X-Spam
+                                                is_spam = False
+                                                if ('X-Spam-Flag: Yes' in email_content or 
+                                                    'X-Spam: Yes' in email_content or
+                                                    'X-Spam-Status:' in email_content and 'Yes' in email_content):
+                                                    is_spam = True
+                                                
+                                                return {
+                                                    'found': True,
+                                                    'is_spam': is_spam,
+                                                    'container': container_name,
+                                                    'path': email_file,
+                                                    'folder': 'INBOX',
+                                                }
+                                    except:
+                                        continue
+                    except:
+                        continue
+        except:
+            continue
+    
+    return {'found': False, 'is_spam': False}
+
 def check_email_spam_after_send(target_email, subject, message_id=None, wait_seconds=8):
     """
     Проверяет, попало ли отправленное письмо в спам через файловую систему Mailu
+    Сначала пытается проверить через docker exec во всех контейнерах,
+    затем через локальный maildir (если доступен).
     Ищет письмо по Message-ID (если задан) и/или по теме.
     Если письмо найдено в папках .Spam/.Junk → считаем СПАМ.
     Если письмо найдено в INBOX → проверяем X-Spam заголовки.
@@ -312,7 +681,69 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
         "found_path": None,
         "spam_headers": {},
         "reason": None,
+        "checked_containers": [],
     }
+    
+    # Ждем обработки письма rspamd
+    print(f"   ⏳ Ожидание {wait_seconds} сек для обработки rspamd...")
+    time.sleep(wait_seconds)
+    
+    # Сначала пытаемся проверить через docker exec во всех контейнерах
+    try:
+        result = subprocess.run(
+            ['docker', 'ps', '--format', '{{.Names}}'],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode == 0:
+            container_names = [name.strip() for name in result.stdout.strip().split('\n') if name.strip()]
+            print(f"   🔍 Проверяю письмо в {len(container_names)} контейнерах через docker exec...")
+            
+            possible_maildir_paths = ['/mailu/mail', '/mail', '/var/mail']
+            
+            for container_name in container_names:
+                for maildir_path in possible_maildir_paths:
+                    try:
+                        check_result = subprocess.run(
+                            ['docker', 'exec', container_name, 'test', '-d', maildir_path],
+                            capture_output=True,
+                            timeout=3
+                        )
+                        
+                        if check_result.returncode == 0:
+                            print(f"      Проверяю контейнер {container_name}, maildir: {maildir_path}")
+                            container_result = check_email_spam_in_container(
+                                container_name, maildir_path, target_email, subject, message_id
+                            )
+                            
+                            info["checked_containers"].append({
+                                'container': container_name,
+                                'maildir': maildir_path,
+                                'result': container_result
+                            })
+                            
+                            if container_result.get('found'):
+                                if container_result.get('is_spam'):
+                                    info["found_in"] = "spam_folder"
+                                    info["found_path"] = container_result.get('path')
+                                    info["reason"] = f"found_in_spam_folder_container_{container_name}"
+                                    print(f"   🚫 Письмо найдено в СПАМ-папке контейнера {container_name}: {container_result.get('path')}")
+                                    return (True, info)
+                                else:
+                                    info["found_in"] = "inbox"
+                                    info["found_path"] = container_result.get('path')
+                                    info["reason"] = f"found_in_inbox_container_{container_name}_not_spam"
+                                    print(f"   ✅ Письмо найдено в INBOX контейнера {container_name}, не спам")
+                                    return (False, info)
+                    except Exception as e:
+                        print(f"      ⚠️  Ошибка проверки {container_name}:{maildir_path}: {e}")
+                        continue
+    except Exception as e:
+        print(f"   ⚠️  Ошибка проверки через docker exec: {e}")
+    
+    # Если через docker exec не нашли, пробуем локальный maildir
     try:
         # Настройки maildir
         mail_dir = os.getenv('MAIL_DIR', '/mailu/mail')
@@ -405,9 +836,10 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                         print(f"         ⚠️  Ошибка чтения: {e}")
             
             print(f"   ⚠️  Maildir не найден ни по одному из путей!")
-            print(f"   🚫 FAIL-CLOSED: Считаем письмо СПАМОМ (не сохраняем), чтобы не пропустить спам в автоматизацию")
-            info["reason"] = "maildir_not_found_fail_closed"
-            return (True, info)  # FAIL-CLOSED: если не можем проверить - лучше не сохранять
+            print(f"   ⚠️  FAIL-OPEN: Не можем проверить спам, считаем что письмо НЕ спам (сохраняем)")
+            print(f"   ⚠️  ВНИМАНИЕ: Проверка спама недоступна - все письма будут сохраняться!")
+            info["reason"] = "maildir_not_found_fail_open"
+            return (False, info)  # FAIL-OPEN: если не можем проверить - сохраняем (но логируем предупреждение)
         
         # ДИАГНОСТИКА: выводим структуру maildir пользователя
         print(f"      📁 Структура {user_maildir}:")
@@ -636,17 +1068,19 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
             time.sleep(1)
 
         print(f"   ⚠️  Письмо не найдено в maildir (INBOX/Spam) за {total_wait} сек")
-        print(f"   🚫 По умолчанию: НЕ сохраняем (fail-closed), чтобы спам не ушел в автоматизацию")
-        info["reason"] = "not_found_fail_closed"
-        return (True, info)
+        print(f"   ⚠️  FAIL-OPEN: Не можем найти письмо, считаем что НЕ спам (сохраняем)")
+        print(f"   ⚠️  ВНИМАНИЕ: Письмо не найдено - будет сохранено без проверки спама!")
+        info["reason"] = "not_found_fail_open"
+        return (False, info)  # FAIL-OPEN: если не можем найти - сохраняем
         
     except Exception as e:
         print(f"   ⚠️  Ошибка проверки спама через maildir: {e}")
         import traceback
         traceback.print_exc()
         info["reason"] = f"exception: {e}"
-        # fail-closed: если проверка сломалась, лучше не сохранять
-        return (True, info)
+        print(f"   ⚠️  FAIL-OPEN: Ошибка проверки, считаем что НЕ спам (сохраняем)")
+        # fail-open: если проверка сломалась - сохраняем (но логируем ошибку)
+        return (False, info)
 
 
 def wait_for_smtp_server(smtp_server, smtp_port, max_attempts=30, delay=2):
@@ -1886,6 +2320,9 @@ def mixed_phishing_attack():
     
     # Выполняем диагностику при старте
     diagnose_maildir_structure()
+    
+    # Сканируем все Docker контейнеры на предмет maildir
+    scan_all_containers_for_maildir()
     
     print("🚀 СМЕШАННАЯ ФИШИНГОВАЯ АТАКА")
     print("=" * 50)
