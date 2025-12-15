@@ -41,6 +41,8 @@ services:
       - IMAP_SERVER=imap
       - IMAP_PORT=143
       - IMAP_PASSWORD=1q2w#E$R
+      # Часовой пояс: UTC+3 (Москва)
+      - TZ=Europe/Moscow
     networks:
       - default
     depends_on:
@@ -63,6 +65,8 @@ services:
     image: ${DOCKER_ORG:-ghcr.io/mailu}/${DOCKER_PREFIX:-}nginx:${MAILU_VERSION:-2024.06}
     restart: always
     env_file: mailu.env
+    environment:
+      - TZ=Europe/Moscow
     logging:
       driver: json-file
       options:
@@ -113,6 +117,8 @@ services:
     image: ${DOCKER_ORG:-ghcr.io/mailu}/${DOCKER_PREFIX:-}dovecot:${MAILU_VERSION:-2024.06}
     restart: always
     env_file: mailu.env
+    environment:
+      - TZ=Europe/Moscow
     logging:
       driver: json-file
       options:
@@ -132,6 +138,8 @@ services:
     image: ${DOCKER_ORG:-ghcr.io/mailu}/${DOCKER_PREFIX:-}postfix:${MAILU_VERSION:-2024.06}
     restart: always
     env_file: mailu.env
+    environment:
+      - TZ=Europe/Moscow
     dns:
       - 192.168.203.53
     logging:
@@ -181,6 +189,8 @@ services:
     hostname: antispam
     restart: always
     env_file: mailu.env
+    environment:
+      - TZ=Europe/Moscow
     dns:
       - 192.168.203.53
     logging:
@@ -224,6 +234,8 @@ services:
     image: ${DOCKER_ORG:-ghcr.io/mailu}/${DOCKER_PREFIX:-}webmail:${MAILU_VERSION:-2024.06}
     restart: always
     env_file: mailu.env
+    environment:
+      - TZ=Europe/Moscow
     logging:
       driver: json-file
       options:
