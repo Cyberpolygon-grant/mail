@@ -37,6 +37,10 @@ services:
       # Путь к maildir для проверки спама через файловую систему
       - MAIL_DIR=/mailu/mail
       - MAIL_DOMAIN=financepro.ru
+      # Параметры IMAP для проверки спама
+      - IMAP_SERVER=imap
+      - IMAP_PORT=143
+      - IMAP_PASSWORD=1q2w#E$R
     networks:
       - default
     depends_on:
