@@ -214,15 +214,17 @@ def find_admin_container():
 
 def get_user_spam_threshold(user_email):
     """
-    Получает уровень спама (spam_threshold) пользователя из базы данных Mailu.
+    Получает настройки спам-фильтра (spam_enabled и spam_threshold) пользователя из базы данных Mailu.
     Это значение соответствует настройке в веб-интерфейсе /admin/user/settings.
-    Возвращает значение порога спама или None в случае ошибки.
+    Возвращает словарь с настройками или None в случае ошибки.
     
     Args:
         user_email: Email пользователя (например, 'operator1@financepro.ru')
     
     Returns:
-        int или None: Порог спама пользователя (100 = фильтр отключен, меньше = более строгий фильтр)
+        dict или None: Словарь с полями 'spam_enabled' и 'spam_threshold', или None при ошибке
+        spam_threshold: Порог спама пользователя (100 = фильтр отключен, меньше = более строгий фильтр)
+        spam_enabled: Включен ли спам-фильтр (True/False или None)
     """
     try:
         # Находим контейнер admin автоматически или используем переменную окружения
@@ -258,21 +260,33 @@ try:
     columns = cursor.fetchall()
     column_names = [col[1] for col in columns]
     
-    # Проверяем наличие поля spam_threshold
+    # Проверяем наличие полей spam_threshold и spam_enabled
+    missing_fields = []
     if 'spam_threshold' not in column_names:
-        print(f'COLUMN_NOT_FOUND: spam_threshold. Available columns: {{", ".join(column_names)}}', file=sys.stderr)
+        missing_fields.append('spam_threshold')
+    if 'spam_enabled' not in column_names:
+        missing_fields.append('spam_enabled')
+    
+    if missing_fields:
+        print(f'COLUMN_NOT_FOUND: {{", ".join(missing_fields)}}. Available columns: {{", ".join(column_names)}}', file=sys.stderr)
         conn.close()
         sys.exit(1)
     
-    # Получаем spam_threshold пользователя из таблицы user
+    # Получаем spam_enabled и spam_threshold пользователя из таблицы user
     # Это значение соответствует настройке в веб-интерфейсе /admin/user/settings
-    cursor.execute('SELECT spam_threshold FROM "user" WHERE email = ?', (user_email,))
+    cursor.execute('SELECT spam_enabled, spam_threshold FROM "user" WHERE email = ?', (user_email,))
     result = cursor.fetchone()
     
     if result:
-        threshold = result[0]
-        # Возвращаем значение как JSON для надежности
-        print(json.dumps({{'spam_threshold': threshold}}))
+        spam_enabled = result[0]
+        spam_threshold = result[1]
+        
+        # Возвращаем значения как JSON для надежности
+        result_dict = {{
+            'spam_enabled': spam_enabled,
+            'spam_threshold': spam_threshold
+        }}
+        print(json.dumps(result_dict))
     else:
         # Проверяем, существует ли пользователь вообще
         cursor.execute('SELECT email FROM "user" WHERE email = ?', (user_email,))
@@ -280,7 +294,7 @@ try:
         if not user_exists:
             print('USER_NOT_FOUND', file=sys.stderr)
         else:
-            print('SPAM_THRESHOLD_NULL', file=sys.stderr)
+            print('SPAM_SETTINGS_NULL', file=sys.stderr)
         sys.exit(1)
     
     conn.close()
@@ -308,23 +322,19 @@ except Exception as e:
                     return None
                 
                 data = json.loads(output)
-                threshold = data.get('spam_threshold')
-                if threshold is not None:
-                    return int(threshold)
-                else:
-                    print(f"   ⚠️  spam_threshold не найден в ответе: {data}")
-                    return None
+                spam_enabled = data.get('spam_enabled')
+                spam_threshold = data.get('spam_threshold')
+                
+                # Возвращаем словарь с обоими полями
+                result_dict = {{
+                    'spam_enabled': spam_enabled,
+                    'spam_threshold': int(spam_threshold) if spam_threshold is not None else None
+                }}
+                return result_dict
             except (json.JSONDecodeError, ValueError) as e:
-                # Fallback: пытаемся прочитать как число напрямую
-                threshold_str = result.stdout.strip()
-                try:
-                    threshold = int(threshold_str)
-                    print(f"   ℹ️  Получено значение напрямую (не JSON): {threshold}")
-                    return threshold
-                except ValueError:
-                    print(f"   ⚠️  Не удалось преобразовать spam_threshold в число: {threshold_str}")
-                    print(f"   ⚠️  Ошибка парсинга JSON: {e}")
-                    return None
+                print(f"   ⚠️  Ошибка парсинга JSON: {e}")
+                print(f"   ⚠️  Ответ: {result.stdout.strip()}")
+                return None
         else:
             error_msg = result.stderr.strip()
             stdout_msg = result.stdout.strip()
@@ -338,20 +348,20 @@ except Exception as e:
                 print(f"   ⚠️  База данных не найдена: {db_path_from_error}")
                 print(f"   💡 Проверьте путь к базе данных в контейнере {admin_container}")
             elif 'COLUMN_NOT_FOUND' in error_msg:
-                print(f"   ⚠️  Поле spam_threshold не найдено в таблице user")
+                print(f"   ⚠️  Поле spam_enabled или spam_threshold не найдено в таблице user")
                 if 'Available columns:' in error_msg:
                     available = error_msg.split('Available columns:')[1].strip()
                     print(f"   💡 Доступные колонки: {available}")
                 print(f"   💡 Возможно, используется другая версия Mailu с другой структурой БД")
-            elif 'SPAM_THRESHOLD_NULL' in error_msg:
-                print(f"   ⚠️  Пользователь найден, но spam_threshold = NULL")
+            elif 'SPAM_SETTINGS_NULL' in error_msg or 'SPAM_THRESHOLD_NULL' in error_msg:
+                print(f"   ⚠️  Пользователь найден, но spam_enabled или spam_threshold = NULL")
                 print(f"   💡 Значение не установлено, используйте значение по умолчанию")
             elif 'ERROR:' in error_msg:
                 error_detail = error_msg.replace('ERROR:', '').strip()
                 print(f"   ⚠️  Ошибка выполнения SQL запроса: {error_detail}")
                 print(f"   💡 Проверьте доступность базы данных и структуру таблицы")
             else:
-                print(f"   ⚠️  Ошибка получения spam_threshold")
+                print(f"   ⚠️  Ошибка получения spam_enabled и spam_threshold")
                 print(f"   ⚠️  stderr: {error_msg}")
                 if stdout_msg:
                     print(f"   ⚠️  stdout: {stdout_msg}")
@@ -360,7 +370,7 @@ except Exception as e:
             return None
             
     except subprocess.TimeoutExpired:
-        print(f"   ⚠️  Таймаут при получении spam_threshold из базы данных")
+        print(f"   ⚠️  Таймаут при получении spam_enabled и spam_threshold из базы данных")
         print(f"   💡 Проверьте доступность контейнера admin")
         return None
     except FileNotFoundError:
@@ -368,7 +378,7 @@ except Exception as e:
         print(f"   💡 Убедитесь, что Docker запущен и доступен")
         return None
     except Exception as e:
-        print(f"   ⚠️  Неожиданная ошибка при получении spam_threshold: {e}")
+        print(f"   ⚠️  Неожиданная ошибка при получении spam_enabled и spam_threshold: {e}")
         import traceback
         print(f"   💡 Детали ошибки:")
         traceback.print_exc()
@@ -415,10 +425,8 @@ try:
     columns = cursor.fetchall()
     column_names = [col[1] for col in columns]
     
-    # Пробуем получить значение из различных возможных полей
-    plus_count_threshold = None
-    
-    # Возможные названия полей для порога количества плюсов
+    # Ищем конкретное поле для порога количества плюсов
+    # Проверяем наличие полей в порядке приоритета
     possible_fields = [
         'plus_count_threshold',
         'spamd_bar_plus_threshold',
@@ -426,24 +434,33 @@ try:
         'x_spamd_bar_plus_threshold'
     ]
     
-    # Проверяем наличие полей
+    # Находим первое доступное поле
     available_field = None
     for field in possible_fields:
         if field in column_names:
             available_field = field
             break
     
-    if available_field:
-        cursor.execute(f'SELECT {{available_field}} FROM "user" WHERE email = ?', (user_email,))
-        result = cursor.fetchone()
-        if result and result[0] is not None:
-            plus_count_threshold = result[0]
+    if not available_field:
+        print(f'COLUMN_NOT_FOUND: None of the fields {{", ".join(possible_fields)}} found. Available columns: {{", ".join(column_names)}}', file=sys.stderr)
+        conn.close()
+        sys.exit(1)
     
-    # Если поле не найдено, возвращаем None (будет использовано значение по умолчанию)
-    if plus_count_threshold is not None:
+    # Получаем значение из найденного поля
+    cursor.execute(f'SELECT {{available_field}} FROM "user" WHERE email = ?', (user_email,))
+    result = cursor.fetchone()
+    
+    if result and result[0] is not None:
+        plus_count_threshold = result[0]
         print(json.dumps({{'plus_count_threshold': plus_count_threshold}}))
     else:
-        print('PLUS_COUNT_THRESHOLD_NOT_SET', file=sys.stderr)
+        # Проверяем, существует ли пользователь вообще
+        cursor.execute('SELECT email FROM "user" WHERE email = ?', (user_email,))
+        user_exists = cursor.fetchone()
+        if not user_exists:
+            print('USER_NOT_FOUND', file=sys.stderr)
+        else:
+            print(f'PLUS_COUNT_THRESHOLD_NULL: Field {{available_field}} is NULL for user', file=sys.stderr)
         sys.exit(1)
     
     conn.close()
@@ -735,7 +752,9 @@ def track_spam_threshold_changes(user_email, output_dir=None):
     if output_dir is None:
         output_dir = Path(os.getenv('ATTACHMENTS_OUTPUT_DIR', '/app/sent_attachments'))
     
-    current_threshold = get_user_spam_threshold(user_email)
+    current_spam_settings = get_user_spam_threshold(user_email)
+    current_threshold = current_spam_settings.get('spam_threshold') if current_spam_settings else None
+    current_spam_enabled = current_spam_settings.get('spam_enabled') if current_spam_settings else None
     
     # Файл для отслеживания изменений
     threshold_log_file = output_dir / "spam_threshold_changes.jsonl"
@@ -744,6 +763,7 @@ def track_spam_threshold_changes(user_email, output_dir=None):
     info = {
         "user_email": user_email,
         "current_threshold": current_threshold,
+        "current_spam_enabled": current_spam_enabled,
         "timestamp": now_moscow().isoformat(),
         "changed": False,
         "previous_threshold": None,
@@ -809,7 +829,7 @@ def track_spam_threshold_changes(user_email, output_dir=None):
 
 def get_user_spam_threshold_cached(user_email, cache_duration=300, use_default=True):
     """
-    Получает уровень спама пользователя с кэшированием результатов.
+    Получает настройки спам-фильтра (spam_enabled и spam_threshold) пользователя с кэшированием результатов.
     Кэш обновляется каждые cache_duration секунд (по умолчанию 5 минут).
     
     Args:
@@ -818,7 +838,9 @@ def get_user_spam_threshold_cached(user_email, cache_duration=300, use_default=T
         use_default: Использовать значение по умолчанию (100) если не удалось получить из БД
     
     Returns:
-        int: Порог спама пользователя (по умолчанию 100 если не удалось получить)
+        dict: Словарь с полями 'spam_enabled' и 'spam_threshold', или None при ошибке
+        spam_threshold: Порог спама пользователя (по умолчанию 100 если не удалось получить)
+        spam_enabled: Включен ли спам-фильтр (True/False или None)
     """
     # Значение по умолчанию из mailu.env (100 = фильтр отключен)
     DEFAULT_THRESHOLD = 100
@@ -836,19 +858,22 @@ def get_user_spam_threshold_cached(user_email, cache_duration=300, use_default=T
         if current_time - cached_time < cache_duration:
             return cached_value
     
-    # Получаем значение из базы данных
-    threshold = get_user_spam_threshold(user_email)
+    # Получаем значения из базы данных
+    spam_settings = get_user_spam_threshold(user_email)
     
     # Если не удалось получить из БД, используем значение по умолчанию
-    if threshold is None and use_default:
-        threshold = DEFAULT_THRESHOLD
-        print(f"   ℹ️  Используется значение по умолчанию: {threshold} (фильтр отключен)")
+    if spam_settings is None and use_default:
+        spam_settings = {
+            'spam_enabled': None,
+            'spam_threshold': DEFAULT_THRESHOLD
+        }
+        print(f"   ℹ️  Используется значение по умолчанию: {DEFAULT_THRESHOLD} (фильтр отключен)")
     
     # Сохраняем в кэш (даже если это значение по умолчанию)
-    if threshold is not None:
-        get_user_spam_threshold_cached._cache[cache_key] = (threshold, current_time)
+    if spam_settings is not None:
+        get_user_spam_threshold_cached._cache[cache_key] = (spam_settings, current_time)
     
-    return threshold
+    return spam_settings
 
 # Функция проверки спама через заголовки
 def check_email_is_spam(msg):
@@ -1451,13 +1476,16 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                 
                 # Логируем уровень спама пользователя при ошибке подключения
                 output_dir = Path(os.getenv('ATTACHMENTS_OUTPUT_DIR', '/app/sent_attachments'))
-                user_spam_threshold = get_user_spam_threshold_cached(target_email)
+                user_spam_settings = get_user_spam_threshold_cached(target_email)
+                user_spam_threshold = user_spam_settings.get('spam_threshold') if user_spam_settings else None
+                user_spam_enabled = user_spam_settings.get('spam_enabled') if user_spam_settings else None
                 if user_spam_threshold is not None:
-                    log_line = f"ПАРАМЕТРЫ СПАМА | Тема: {subject[:50]} | Ошибка подключения к IMAP: {error_msg} | Уровень спама пользователя (spam_threshold): {user_spam_threshold}"
+                    log_line = f"ПАРАМЕТРЫ СПАМА | Тема: {subject[:50]} | Ошибка подключения к IMAP: {error_msg} | Уровень спама пользователя (spam_threshold): {user_spam_threshold} | Спам-фильтр включен (spam_enabled): {user_spam_enabled}"
                     append_send_attachs_log_line(output_dir, log_line)
                 
                 info["reason"] = f"imap_connection_failed: {error_msg}"
                 info["user_spam_threshold"] = user_spam_threshold
+                info["user_spam_enabled"] = user_spam_enabled
                 # При ошибке подключения сохраняем (fail-open)
                 return (False, info)
         except Exception as e:
@@ -1467,13 +1495,16 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
             
             # Логируем уровень спама пользователя при неожиданной ошибке
             output_dir = Path(os.getenv('ATTACHMENTS_OUTPUT_DIR', '/app/sent_attachments'))
-            user_spam_threshold = get_user_spam_threshold_cached(target_email)
+            user_spam_settings = get_user_spam_threshold_cached(target_email)
+            user_spam_threshold = user_spam_settings.get('spam_threshold') if user_spam_settings else None
+            user_spam_enabled = user_spam_settings.get('spam_enabled') if user_spam_settings else None
             if user_spam_threshold is not None:
-                log_line = f"ПАРАМЕТРЫ СПАМА | Тема: {subject[:50]} | Неожиданная ошибка IMAP: {error_msg} | Уровень спама пользователя (spam_threshold): {user_spam_threshold}"
+                log_line = f"ПАРАМЕТРЫ СПАМА | Тема: {subject[:50]} | Неожиданная ошибка IMAP: {error_msg} | Уровень спама пользователя (spam_threshold): {user_spam_threshold} | Спам-фильтр включен (spam_enabled): {user_spam_enabled}"
                 append_send_attachs_log_line(output_dir, log_line)
             
             info["reason"] = f"imap_exception: {error_msg}"
             info["user_spam_threshold"] = user_spam_threshold
+            info["user_spam_enabled"] = user_spam_enabled
             # При неожиданной ошибке сохраняем (fail-open)
             return (False, info)
     
@@ -1483,13 +1514,16 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
         
         # Логируем уровень спама пользователя
         output_dir = Path(os.getenv('ATTACHMENTS_OUTPUT_DIR', '/app/sent_attachments'))
-        user_spam_threshold = get_user_spam_threshold_cached(target_email)
+        user_spam_settings = get_user_spam_threshold_cached(target_email)
+        user_spam_threshold = user_spam_settings.get('spam_threshold') if user_spam_settings else None
+        user_spam_enabled = user_spam_settings.get('spam_enabled') if user_spam_settings else None
         if user_spam_threshold is not None:
-            log_line = f"ПАРАМЕТРЫ СПАМА | Тема: {subject[:50]} | Не удалось подключиться к IMAP | Уровень спама пользователя (spam_threshold): {user_spam_threshold}"
+            log_line = f"ПАРАМЕТРЫ СПАМА | Тема: {subject[:50]} | Не удалось подключиться к IMAP | Уровень спама пользователя (spam_threshold): {user_spam_threshold} | Спам-фильтр включен (spam_enabled): {user_spam_enabled}"
             append_send_attachs_log_line(output_dir, log_line)
         
         info["reason"] = "imap_connection_failed_after_retries"
         info["user_spam_threshold"] = user_spam_threshold
+        info["user_spam_enabled"] = user_spam_enabled
         return (False, info)  # При ошибке сохраняем (fail-open)
     
     try:
@@ -1555,8 +1589,10 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                     # Подсчитываем количество '+' в X-Spamd-Bar
                     spamd_bar_plus_count = x_spamd_bar.count('+') if x_spamd_bar else 0
                     
-                    # Получаем уровень спама пользователя из базы данных
-                    user_spam_threshold = get_user_spam_threshold_cached(target_email)
+                    # Получаем настройки спам-фильтра пользователя из базы данных
+                    user_spam_settings = get_user_spam_threshold_cached(target_email)
+                    user_spam_threshold = user_spam_settings.get('spam_threshold') if user_spam_settings else None
+                    user_spam_enabled = user_spam_settings.get('spam_enabled') if user_spam_settings else None
                     
                     # Получаем порог количества плюсов из базы данных
                     user_plus_count_threshold = get_user_plus_count_threshold(target_email)
@@ -1566,6 +1602,7 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                     info["x_spamd_bar"] = x_spamd_bar
                     info["spamd_bar_plus_count"] = spamd_bar_plus_count
                     info["user_spam_threshold"] = user_spam_threshold
+                    info["user_spam_enabled"] = user_spam_enabled
                     info["user_plus_count_threshold"] = user_plus_count_threshold
                     info["found_in"] = "imap_inbox"
                     
@@ -1576,6 +1613,8 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                     print(f"      Количество '+' в X-Spamd-Bar: {spamd_bar_plus_count}")
                     if user_spam_threshold is not None:
                         print(f"      Уровень спама пользователя (spam_threshold): {user_spam_threshold}")
+                    if user_spam_enabled is not None:
+                        print(f"      Спам-фильтр включен (spam_enabled): {user_spam_enabled}")
                     else:
                         print(f"      ⚠️  Не удалось получить уровень спама пользователя из БД")
                     
@@ -1610,6 +1649,8 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                     # Добавляем настройки спам-фильтра из БД
                     if user_spam_threshold is not None:
                         spam_log_parts.append(f"| Spam-filter tolerance (spam_threshold): {user_spam_threshold}")
+                    if user_spam_enabled is not None:
+                        spam_log_parts.append(f"| Спам-фильтр включен (spam_enabled): {user_spam_enabled}")
                     
                     # Добавляем информацию о сравнении количества плюсов
                     if user_plus_count_threshold is not None:
@@ -1661,13 +1702,16 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
         
         # Логируем уровень спама пользователя даже если письмо не найдено
         output_dir = Path(os.getenv('ATTACHMENTS_OUTPUT_DIR', '/app/sent_attachments'))
-        user_spam_threshold = get_user_spam_threshold_cached(target_email)
+        user_spam_settings = get_user_spam_threshold_cached(target_email)
+        user_spam_threshold = user_spam_settings.get('spam_threshold') if user_spam_settings else None
+        user_spam_enabled = user_spam_settings.get('spam_enabled') if user_spam_settings else None
         if user_spam_threshold is not None:
-            log_line = f"ПАРАМЕТРЫ СПАМА | Тема: {subject[:50]} | Письмо не найдено в INBOX | Уровень спама пользователя (spam_threshold): {user_spam_threshold}"
+            log_line = f"ПАРАМЕТРЫ СПАМА | Тема: {subject[:50]} | Письмо не найдено в INBOX | Уровень спама пользователя (spam_threshold): {user_spam_threshold} | Спам-фильтр включен (spam_enabled): {user_spam_enabled}"
             append_send_attachs_log_line(output_dir, log_line)
         
         info["reason"] = "email_not_found_in_imap"
         info["user_spam_threshold"] = user_spam_threshold
+        info["user_spam_enabled"] = user_spam_enabled
         return (False, info)  # При отсутствии письма сохраняем (fail-open)
         
     except Exception as e:
@@ -1682,13 +1726,16 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
         
         # Логируем уровень спама пользователя даже при ошибке
         output_dir = Path(os.getenv('ATTACHMENTS_OUTPUT_DIR', '/app/sent_attachments'))
-        user_spam_threshold = get_user_spam_threshold_cached(target_email)
+        user_spam_settings = get_user_spam_threshold_cached(target_email)
+        user_spam_threshold = user_spam_settings.get('spam_threshold') if user_spam_settings else None
+        user_spam_enabled = user_spam_settings.get('spam_enabled') if user_spam_settings else None
         if user_spam_threshold is not None:
-            log_line = f"ПАРАМЕТРЫ СПАМА | Тема: {subject[:50]} | Ошибка IMAP: {error_msg_utf8} | Уровень спама пользователя (spam_threshold): {user_spam_threshold}"
+            log_line = f"ПАРАМЕТРЫ СПАМА | Тема: {subject[:50]} | Ошибка IMAP: {error_msg_utf8} | Уровень спама пользователя (spam_threshold): {user_spam_threshold} | Спам-фильтр включен (spam_enabled): {user_spam_enabled}"
             append_send_attachs_log_line(output_dir, log_line)
         
         info["reason"] = f"imap_exception: {error_msg_utf8}"
         info["user_spam_threshold"] = user_spam_threshold
+        info["user_spam_enabled"] = user_spam_enabled
         # При ошибке сохраняем (fail-open)
         return (False, info)
     finally:
@@ -2994,10 +3041,15 @@ def mixed_phishing_attack():
     else:
         print(f"⚠️  Не удалось получить настройки спам-фильтра из БД")
         
-        # Fallback: пробуем получить только spam_threshold
-        user_spam_threshold = get_user_spam_threshold_cached(target_email)
-        if user_spam_threshold is not None:
-            print(f"✅ Уровень спама пользователя (spam_threshold): {user_spam_threshold}")
+        # Fallback: пробуем получить spam_enabled и spam_threshold
+        user_spam_settings = get_user_spam_threshold_cached(target_email)
+        if user_spam_settings is not None:
+            user_spam_threshold = user_spam_settings.get('spam_threshold')
+            user_spam_enabled = user_spam_settings.get('spam_enabled')
+            if user_spam_threshold is not None:
+                print(f"✅ Уровень спама пользователя (spam_threshold): {user_spam_threshold}")
+            if user_spam_enabled is not None:
+                print(f"✅ Спам-фильтр включен (spam_enabled): {user_spam_enabled}")
     
     print("=" * 60 + "\n")
     
