@@ -53,16 +53,57 @@ def log_send_attachs_action(output_dir: Path, action: str, meta: dict):
         log_path = output_dir / ATTACHMENTS_ACTION_LOG
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        # Дублируем в человекочитаемый лог-файл
+        
+        # Формируем понятное сообщение для текстового лога
         msg_type = (meta or {}).get("type", "?")
         subject = (meta or {}).get("subject", "")
         saved_files = (meta or {}).get("saved_files", [])
         planned = (meta or {}).get("planned_attachments", [])
-        append_send_attachs_log_line(
-            output_dir,
-            f"{action} type={msg_type} subject={subject!r} saved_files={len(saved_files)} planned_attachments={len(planned)}",
+        spam_check = (meta or {}).get("spam_check", {})
+        error_msg = (meta or {}).get("error", "")
+        
+        # Определяем решение и причину
+        if action == "SAVED":
+            decision = "✅ СОХРАНЕНО для автоматизации оператора"
+            reason = "Письмо НЕ является спамом"
+            spam_reason = spam_check.get("reason", "")
+            found_in = spam_check.get("found_in", "")
+            if found_in:
+                reason += f" (найдено в {found_in})"
+            if spam_reason:
+                reason += f" ({spam_reason})"
+        elif action == "SKIPPED_SPAM":
+            decision = "🚫 НЕ СОХРАНЕНО для автоматизации оператора"
+            reason = "Письмо попало в СПАМ"
+            spam_reason = spam_check.get("reason", "")
+            found_in = spam_check.get("found_in", "")
+            if found_in == "spam_folder":
+                reason = "Письмо найдено в папке СПАМ"
+            elif found_in == "inbox":
+                reason = "Письмо в INBOX, но заголовки X-Spam указывают на спам"
+            elif spam_reason:
+                reason = f"Письмо помечено как спам ({spam_reason})"
+        elif action == "SEND_FAILED":
+            decision = "❌ НЕ СОХРАНЕНО для автоматизации оператора"
+            reason = "Не удалось отправить письмо через SMTP"
+        elif action == "ERROR":
+            decision = "⚠️ НЕ СОХРАНЕНО для автоматизации оператора"
+            reason = f"Ошибка: {error_msg}" if error_msg else "Произошла ошибка при обработке"
+        else:
+            decision = f"❓ {action}"
+            reason = "Неизвестное действие"
+        
+        # Формируем строку лога
+        log_line = (
+            f"{decision} | "
+            f"Тип: {msg_type} | "
+            f"Тема: {subject[:60]} | "
+            f"Причина: {reason} | "
+            f"Файлов сохранено: {len(saved_files)}/{len(planned)}"
         )
-        print(f"   🧾 send_attachs log: {action} -> {log_path.name} (+ {ATTACHMENTS_TEXT_LOG})")
+        
+        append_send_attachs_log_line(output_dir, log_line)
+        print(f"   🧾 send_attachs log: {decision} -> {log_path.name} (+ {ATTACHMENTS_TEXT_LOG})")
     except Exception as e:
         print(f"   ⚠️  Не удалось записать send_attachs log: {e}")
 
@@ -283,11 +324,55 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
         # Путь к maildir пользователя
         user_maildir = Path(mail_dir) / mail_domain / local_part
         
+        # ДИАГНОСТИКА: проверяем структуру maildir
+        print(f"   🔍 ДИАГНОСТИКА maildir:")
+        print(f"      MAIL_DIR={mail_dir}")
+        print(f"      MAIL_DOMAIN={mail_domain}")
+        print(f"      local_part={local_part}")
+        print(f"      user_maildir={user_maildir}")
+        print(f"      user_maildir.exists()={user_maildir.exists()}")
+        
         # Проверяем существование директории
         if not user_maildir.exists():
-            print(f"   ⚠️  Maildir не найден: {user_maildir}, считаем что письмо не в спаме")
+            print(f"   ⚠️  Maildir не найден: {user_maildir}")
+            # Проверяем родительские директории
+            if Path(mail_dir).exists():
+                print(f"      ✅ {mail_dir} существует")
+                domain_dir = Path(mail_dir) / mail_domain
+                if domain_dir.exists():
+                    print(f"      ✅ {domain_dir} существует")
+                    print(f"      📁 Содержимое {domain_dir}:")
+                    try:
+                        for item in domain_dir.iterdir():
+                            print(f"         - {item.name} ({'dir' if item.is_dir() else 'file'})")
+                    except Exception as e:
+                        print(f"         ⚠️  Ошибка чтения: {e}")
+                else:
+                    print(f"      ❌ {domain_dir} НЕ существует")
+            else:
+                print(f"      ❌ {mail_dir} НЕ существует")
             info["reason"] = "maildir_not_found"
             return (False, info)
+        
+        # ДИАГНОСТИКА: выводим структуру maildir пользователя
+        print(f"      📁 Структура {user_maildir}:")
+        try:
+            all_items = list(user_maildir.iterdir())
+            for item in sorted(all_items):
+                item_type = "DIR" if item.is_dir() else "FILE"
+                print(f"         {item_type}: {item.name}")
+                # Если это директория, показываем её содержимое
+                if item.is_dir():
+                    try:
+                        sub_items = list(item.iterdir())
+                        for sub in sub_items[:5]:  # Показываем первые 5 элементов
+                            print(f"            - {sub.name}")
+                        if len(sub_items) > 5:
+                            print(f"            ... и ещё {len(sub_items) - 5} элементов")
+                    except Exception as e:
+                        print(f"            ⚠️  Ошибка чтения: {e}")
+        except Exception as e:
+            print(f"      ⚠️  Ошибка чтения структуры: {e}")
         
         # Нормализуем Message-ID для сравнения
         msgid_norm = None
@@ -295,12 +380,17 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
             msgid_norm = message_id.strip()
 
         # Будем ждать/проверять некоторое время, т.к. письмо может сначала появиться в INBOX, а потом переехать в Spam
-        total_wait = max(wait_seconds, 6)
+        # Увеличиваем время ожидания до 20 секунд для надежности (rspamd может обрабатывать медленно)
+        total_wait = max(wait_seconds, 20)
         deadline = time.time() + total_wait
 
         subject_part = (subject or "")[:60].lower()
 
+        # Polling до deadline
+        iteration = 0
+        
         def iter_recent_files(dir_path: Path, recent_seconds: int = 300):
+            """Ищет недавние файлы в директории"""
             if not dir_path.exists():
                 return []
             current_time = time.time()
@@ -310,25 +400,36 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                     if p.is_file():
                         try:
                             mtime = p.stat().st_mtime
+                            # Увеличиваем окно поиска до 5 минут для надежности
                             if current_time - mtime < recent_seconds:
                                 files.append((p, mtime))
                         except Exception:
                             continue
-            except Exception:
+            except Exception as e:
+                # iteration доступна через замыкание
+                if iteration == 1:
+                    print(f"         ⚠️  Ошибка итерации {dir_path}: {e}")
                 return []
             files.sort(key=lambda x: x[1], reverse=True)
             return files
 
         def message_matches(msg_obj):
-            # 1) Message-ID приоритетнее темы
+            # 1) Message-ID приоритетнее темы (нормализуем для сравнения)
             if msgid_norm:
                 got = (msg_obj.get("Message-ID", "") or "").strip()
-                if got == msgid_norm:
+                # Убираем угловые скобки для сравнения
+                got_clean = got.strip('<>')
+                msgid_clean = msgid_norm.strip('<>')
+                if got_clean == msgid_clean or got == msgid_norm:
                     return True
-            # 2) fallback по теме
-            msg_subject = decode_mime_words(msg_obj.get('Subject', '')).lower()
-            if subject_part and subject_part in msg_subject:
-                return True
+            # 2) fallback по теме (более гибкое сравнение)
+            if subject_part:
+                msg_subject = decode_mime_words(msg_obj.get('Subject', '')).lower()
+                # Проверяем совпадение начала темы или ключевых слов
+                if (subject_part in msg_subject or 
+                    msg_subject[:len(subject_part)] == subject_part or
+                    subject_part[:40] in msg_subject[:60]):
+                    return True
             return False
 
         def check_headers_for_spam(msg_obj):
@@ -368,41 +469,93 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
 
         spam_dirs = []
         try:
+            # Ищем ВСЕ скрытые папки (начинающиеся с точки) - это могут быть системные папки Mailu/Dovecot
             for sub in user_maildir.iterdir():
-                if sub.is_dir() and sub.name.startswith('.'):
-                    low = sub.name.lower()
-                    if 'spam' in low or 'junk' in low:
-                        spam_dirs.extend([sub / 'new', sub / 'cur'])
-        except Exception:
-            pass
-
+                if sub.is_dir():
+                    name = sub.name
+                    low = name.lower()
+                    # Проверяем различные варианты названий спам-папок
+                    is_spam_folder = (
+                        name.startswith('.') and ('spam' in low or 'junk' in low) or
+                        low == 'spam' or low == 'junk' or
+                        low == '.spam' or low == '.junk' or
+                        'spam' in low or 'junk' in low
+                    )
+                    if is_spam_folder:
+                        new_dir = sub / 'new'
+                        cur_dir = sub / 'cur'
+                        if new_dir.exists() or cur_dir.exists():
+                            spam_dirs.extend([new_dir, cur_dir])
+                            print(f"      ✅ Найдена спам-папка: {sub.name} (new={new_dir.exists()}, cur={cur_dir.exists()})")
+                        else:
+                            # Если нет new/cur, возможно это плоская структура - проверяем саму папку
+                            spam_dirs.append(sub)
+                            print(f"      ✅ Найдена спам-папка (плоская): {sub.name}")
+        except Exception as e:
+            print(f"      ⚠️  Ошибка поиска спам-папок: {e}")
+            import traceback
+            traceback.print_exc()
+        
         print(f"   ⏳ Проверка maildir (ищу по Message-ID/теме) в: {user_maildir}")
+        print(f"      INBOX dirs: {[str(d) for d in inbox_dirs]}")
+        print(f"      SPAM dirs: {[str(d) for d in spam_dirs]}")
         if msgid_norm:
             print(f"      Message-ID: {msgid_norm}")
+        print(f"      Subject (для поиска): {subject_part[:50]}")
 
         # Polling до deadline
         while True:
+            iteration += 1
+            if iteration == 1:
+                print(f"   🔄 Итерация {iteration}: начинаю поиск...")
+            
             # 1) Проверяем спам-папки (если письмо там — сразу СПАМ)
             for d in spam_dirs:
-                for email_file, _ in iter_recent_files(d):
+                if not d.exists():
+                    continue
+                recent = iter_recent_files(d)
+                if iteration == 1:
+                    print(f"      📁 Проверяю спам-папку {d}: найдено {len(recent)} недавних файлов")
+                for email_file, _ in recent:
                     try:
                         with open(email_file, 'rb') as f:
                             msg = email.message_from_bytes(f.read())
+                        msg_id_got = (msg.get("Message-ID", "") or "").strip()
+                        msg_subject_got = decode_mime_words(msg.get('Subject', '')).lower()
+                        if iteration == 1:
+                            print(f"         Проверяю файл {email_file.name}:")
+                            print(f"            Message-ID: {msg_id_got[:60] if msg_id_got else '(нет)'}")
+                            print(f"            Subject: {msg_subject_got[:60]}")
                         if message_matches(msg):
                             info["found_in"] = "spam_folder"
                             info["found_path"] = str(email_file)
                             info["reason"] = "found_in_spam_folder"
                             print(f"   🚫 Найдено в СПАМ-папке: {email_file}")
                             return (True, info)
-                    except Exception:
+                    except Exception as e:
+                        if iteration == 1:
+                            print(f"         ⚠️  Ошибка чтения {email_file.name}: {e}")
                         continue
 
             # 2) Проверяем INBOX — если письмо там, смотрим заголовки
             for d in inbox_dirs:
-                for email_file, _ in iter_recent_files(d):
+                if not d.exists():
+                    if iteration == 1:
+                        print(f"      ⚠️  INBOX dir не существует: {d}")
+                    continue
+                recent = iter_recent_files(d)
+                if iteration == 1:
+                    print(f"      📁 Проверяю INBOX {d}: найдено {len(recent)} недавних файлов")
+                for email_file, _ in recent:
                     try:
                         with open(email_file, 'rb') as f:
                             msg = email.message_from_bytes(f.read())
+                        msg_id_got = (msg.get("Message-ID", "") or "").strip()
+                        msg_subject_got = decode_mime_words(msg.get('Subject', '')).lower()
+                        if iteration == 1:
+                            print(f"         Проверяю файл {email_file.name}:")
+                            print(f"            Message-ID: {msg_id_got[:60] if msg_id_got else '(нет)'}")
+                            print(f"            Subject: {msg_subject_got[:60]}")
                         if message_matches(msg):
                             info["found_in"] = "inbox"
                             info["found_path"] = str(email_file)
@@ -414,11 +567,17 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                             info["reason"] = "found_in_inbox_not_spam"
                             print(f"   ✅ Найдено в INBOX, не спам по заголовкам: {email_file}")
                             return (False, info)
-                    except Exception:
+                    except Exception as e:
+                        if iteration == 1:
+                            print(f"         ⚠️  Ошибка чтения {email_file.name}: {e}")
                         continue
 
             if time.time() >= deadline:
                 break
+            # Проверяем каждую секунду, но выводим прогресс каждые 3 секунды
+            if iteration % 3 == 0 and iteration > 1:
+                elapsed = total_wait - (deadline - time.time())
+                print(f"   ⏳ Поиск продолжается... ({int(elapsed)}/{total_wait} сек)")
             time.sleep(1)
 
         print(f"   ⚠️  Письмо не найдено в maildir (INBOX/Spam) за {total_wait} сек")
@@ -1002,12 +1161,7 @@ def send_legitimate_email():
         print(f"   📎 Вложения: {num_attachments} файл(ов)")
         print(f"   ✅ Легитимное письмо")
         
-        # Ожидание готовности SMTP сервера
-        if not wait_for_smtp_server(smtp_server, smtp_port):
-            print(f"   ❌ SMTP сервер не готов, пропускаем отправку")
-            return False
-        
-        # Отправка с повторными попытками
+        # Отправка с повторными попытками (без предварительной проверки SMTP)
         if send_email_with_retry(msg, smtp_server, smtp_port):
             print(f"   ✅ Легитимное письмо отправлено!")
             
@@ -1016,7 +1170,11 @@ def send_legitimate_email():
             is_spam, spam_info = check_email_spam_after_send(target_email, subject, message_id=msg_id, wait_seconds=8)
             
             if is_spam:
-                print(f"   🚫 Письмо попало в СПАМ - НЕ сохраняем для автоматизации оператора")
+                spam_reason_detail = spam_info.get("reason", "неизвестно")
+                found_in = spam_info.get("found_in", "")
+                print(f"   🚫 РЕШЕНИЕ: НЕ СОХРАНЯЕМ для автоматизации оператора")
+                print(f"      Причина: Письмо попало в СПАМ")
+                print(f"      Детали проверки: {spam_reason_detail} (найдено в: {found_in})")
                 log_send_attachs_action(output_dir, "SKIPPED_SPAM", {
                     "type": "legitimate",
                     "from": sender_email,
@@ -1028,7 +1186,11 @@ def send_legitimate_email():
                 })
                 return True
             else:
-                print(f"   ✅ Письмо НЕ в спаме - СОХРАНЯЕМ для автоматизации оператора")
+                spam_reason_detail = spam_info.get("reason", "неизвестно")
+                found_in = spam_info.get("found_in", "")
+                print(f"   ✅ РЕШЕНИЕ: СОХРАНЯЕМ для автоматизации оператора")
+                print(f"      Причина: Письмо НЕ является спамом")
+                print(f"      Детали проверки: {spam_reason_detail} (найдено в: {found_in})")
                 
                 # ТЕПЕРЬ сохраняем файлы на диск (только если НЕ спам!)
                 saved_files = []
@@ -1056,6 +1218,8 @@ def send_legitimate_email():
                     with open(metadata_file, 'w', encoding='utf-8') as f:
                         json.dump(email_metadata, f, ensure_ascii=False, indent=2)
                     print(f"      💾 Сохранены метаданные: {metadata_file.name}")
+                    print(f"   ✅ Файлы сохранены: {', '.join(saved_files)}")
+                    print(f"   ✅ Метаданные сохранены: {metadata_file.name}")
                     log_send_attachs_action(output_dir, "SAVED", {
                         "type": "legitimate",
                         "from": sender_email,
@@ -1082,7 +1246,8 @@ def send_legitimate_email():
             
             return True
         else:
-            print(f"   ❌ Не удалось отправить легитимное письмо")
+            print(f"   ❌ РЕШЕНИЕ: НЕ СОХРАНЯЕМ для автоматизации оператора")
+            print(f"      Причина: Не удалось отправить письмо через SMTP")
             log_send_attachs_action(output_dir, "SEND_FAILED", {
                 "type": "legitimate",
                 "from": sender_email,
@@ -1450,12 +1615,7 @@ P.P.S. Готовы ответить на любые вопросы по тел�
         
         print(f"   📎 Вложение: {filename} ({file_description})")
         
-        # Ожидание готовности SMTP сервера
-        if not wait_for_smtp_server(smtp_server, smtp_port):
-            print(f"   ❌ SMTP сервер не готов, пропускаем отправку")
-            return False
-        
-        # Отправка с повторными попытками
+        # Отправка с повторными попытками (без предварительной проверки SMTP)
         if send_email_with_retry(msg, smtp_server, smtp_port):
             print(f"   ✅ Вредоносное письмо отправлено!")
             
@@ -1464,7 +1624,11 @@ P.P.S. Готовы ответить на любые вопросы по тел�
             is_spam, spam_info = check_email_spam_after_send(target_email, subject, message_id=msg_id, wait_seconds=8)
             
             if is_spam:
-                print(f"   🚫 Письмо попало в СПАМ - НЕ сохраняем для автоматизации оператора")
+                spam_reason_detail = spam_info.get("reason", "неизвестно")
+                found_in = spam_info.get("found_in", "")
+                print(f"   🚫 РЕШЕНИЕ: НЕ СОХРАНЯЕМ для автоматизации оператора")
+                print(f"      Причина: Письмо попало в СПАМ")
+                print(f"      Детали проверки: {spam_reason_detail} (найдено в: {found_in})")
                 log_send_attachs_action(output_dir, "SKIPPED_SPAM", {
                     "type": "malicious",
                     "from": sender_email,
@@ -1476,7 +1640,11 @@ P.P.S. Готовы ответить на любые вопросы по тел�
                 })
                 return True
             else:
-                print(f"   ✅ Письмо НЕ в спаме - СОХРАНЯЕМ для автоматизации оператора")
+                spam_reason_detail = spam_info.get("reason", "неизвестно")
+                found_in = spam_info.get("found_in", "")
+                print(f"   ✅ РЕШЕНИЕ: СОХРАНЯЕМ для автоматизации оператора")
+                print(f"      Причина: Письмо НЕ является спамом")
+                print(f"      Детали проверки: {spam_reason_detail} (найдено в: {found_in})")
                 
                 # ТЕПЕРЬ сохраняем файл на диск (только если НЕ спам!)
                 file_content, filename, mime_type = attachment_data
@@ -1502,6 +1670,7 @@ P.P.S. Готовы ответить на любые вопросы по тел�
                     with open(metadata_file, 'w', encoding='utf-8') as f:
                         json.dump(email_metadata, f, ensure_ascii=False, indent=2)
                     print(f"      💾 Сохранены метаданные: {metadata_file.name}")
+                    print(f"   ✅ Файл сохранен: {safe_filename}")
                     log_send_attachs_action(output_dir, "SAVED", {
                         "type": "malicious",
                         "from": sender_email,
@@ -1528,7 +1697,8 @@ P.P.S. Готовы ответить на любые вопросы по тел�
             
             return True
         else:
-            print(f"   ❌ Не удалось отправить вредоносное письмо")
+            print(f"   ❌ РЕШЕНИЕ: НЕ СОХРАНЯЕМ для автоматизации оператора")
+            print(f"      Причина: Не удалось отправить письмо через SMTP")
             log_send_attachs_action(output_dir, "SEND_FAILED", {
                 "type": "malicious",
                 "from": sender_email,
@@ -1597,8 +1767,70 @@ End Sub
     
     return xls_data
 
+def diagnose_maildir_structure():
+    """Диагностика структуры maildir при старте"""
+    print("\n🔍 ДИАГНОСТИКА MAILDIR ПРИ СТАРТЕ:")
+    print("=" * 60)
+    try:
+        mail_dir = os.getenv('MAIL_DIR', '/mailu/mail')
+        mail_domain = os.getenv('MAIL_DOMAIN', 'financepro.ru')
+        target_email = os.getenv('TARGET_EMAIL', 'operator1@financepro.ru')
+        local_part = target_email.split('@')[0] if '@' in target_email else target_email
+        user_maildir = Path(mail_dir) / mail_domain / local_part
+        
+        print(f"MAIL_DIR: {mail_dir}")
+        print(f"MAIL_DOMAIN: {mail_domain}")
+        print(f"Target email: {target_email}")
+        print(f"Local part: {local_part}")
+        print(f"User maildir: {user_maildir}")
+        print(f"Exists: {user_maildir.exists()}")
+        
+        if Path(mail_dir).exists():
+            print(f"\n✅ {mail_dir} существует")
+            domain_dir = Path(mail_dir) / mail_domain
+            if domain_dir.exists():
+                print(f"✅ {domain_dir} существует")
+                users = list(domain_dir.iterdir())
+                print(f"   Пользователей в домене: {len(users)}")
+                for u in users[:5]:
+                    print(f"   - {u.name}")
+            else:
+                print(f"❌ {domain_dir} НЕ существует")
+        else:
+            print(f"❌ {mail_dir} НЕ существует")
+        
+        if user_maildir.exists():
+            print(f"\n✅ Maildir пользователя существует: {user_maildir}")
+            print(f"\n📁 Структура папок:")
+            try:
+                for item in sorted(user_maildir.iterdir()):
+                    if item.is_dir():
+                        print(f"   📂 {item.name}/")
+                        try:
+                            sub_items = list(item.iterdir())
+                            for sub in sub_items[:3]:
+                                print(f"      - {sub.name}")
+                            if len(sub_items) > 3:
+                                print(f"      ... и ещё {len(sub_items) - 3}")
+                        except:
+                            pass
+                    else:
+                        print(f"   📄 {item.name}")
+            except Exception as e:
+                print(f"   ⚠️  Ошибка чтения: {e}")
+        else:
+            print(f"\n❌ Maildir пользователя НЕ существует: {user_maildir}")
+        print("=" * 60 + "\n")
+    except Exception as e:
+        print(f"⚠️  Ошибка диагностики: {e}")
+        import traceback
+        traceback.print_exc()
+
 def mixed_phishing_attack():
     """Смешанная фишинговая атака"""
+    
+    # Выполняем диагностику при старте
+    diagnose_maildir_structure()
     
     print("🚀 СМЕШАННАЯ ФИШИНГОВАЯ АТАКА")
     print("=" * 50)
