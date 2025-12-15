@@ -863,11 +863,10 @@ def send_legitimate_email():
     # Генерируем timestamp для всех файлов этого письма
     timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
     
-    # Временные файлы для удаления, если письмо попадет в спам
-    temp_files = []
-    temp_metadata_file = None
+    # Сохраняем файлы В ПАМЯТИ (не на диск!) до проверки спама
+    attachments_data = []  # (file_content, filename, mime_type)
     
-    # Метаданные письма для сохранения
+    # Метаданные письма для сохранения ПОСЛЕ проверки спама
     email_metadata = {
         'type': 'legitimate',
         'from': sender_email,
@@ -892,22 +891,8 @@ def send_legitimate_email():
             file_type, company, is_malicious=False, subject=subject, attachment_index=i
         )
         
-        # Сохраняем файл во временную директорию (пока не проверим спам)
-        safe_filename = f"{timestamp_str}_{filename}"
-        file_path = output_dir / safe_filename
-        temp_files.append(file_path)
-        
-        try:
-            with open(file_path, 'wb') as f:
-                f.write(file_content)
-            email_metadata['attachments'].append({
-                'filename': filename,
-                'saved_as': safe_filename,
-                'mime_type': mime_type,
-                'size': len(file_content)
-            })
-        except Exception as e:
-            print(f"   ⚠️  Не удалось сохранить файл {filename}: {e}")
+        # Сохраняем данные в памяти (НЕ на диск!)
+        attachments_data.append((file_content, filename, mime_type))
         
         # Создаем вложение с правильными заголовками
         maintype, subtype = mime_type.split('/')
@@ -919,8 +904,6 @@ def send_legitimate_email():
         part.add_header('Content-Type', mime_type, name=('utf-8', '', filename))
         part.add_header('Content-Disposition', 'attachment', filename=('utf-8', '', filename))
         msg.attach(part)
-    
-    # Пока НЕ сохраняем метаданные - сохраним только после проверки спама
     
     try:
         print(f"📧 [{datetime.now().strftime('%H:%M:%S')}] Отправка ЛЕГИТИМНОГО письма")
@@ -944,42 +927,44 @@ def send_legitimate_email():
             
             # Проверяем, попало ли письмо в спам
             print(f"   🔍 Проверка, попало ли письмо в спам...")
-            is_spam = check_email_spam_after_send(target_email, subject, wait_seconds=5)
+            is_spam = check_email_spam_after_send(target_email, subject, wait_seconds=8)
             
             if is_spam:
-                print(f"   🚫 Письмо попало в спам - удаляем сохраненные файлы")
-                # Удаляем временные файлы
-                for temp_file in temp_files:
-                    try:
-                        if temp_file.exists():
-                            temp_file.unlink()
-                            print(f"      Удален: {temp_file.name}")
-                    except Exception as e:
-                        print(f"      ⚠️  Не удалось удалить {temp_file.name}: {e}")
-                # Не сохраняем метаданные
-                print(f"   🚫 Письмо не сохранено для автоматизации оператора (попало в спам)")
+                print(f"   🚫 Письмо попало в СПАМ - НЕ сохраняем для автоматизации оператора")
+                return True
             else:
-                print(f"   ✅ Письмо НЕ в спаме - сохраняем для автоматизации оператора")
+                print(f"   ✅ Письмо НЕ в спаме - СОХРАНЯЕМ для автоматизации оператора")
+                
+                # ТЕПЕРЬ сохраняем файлы на диск (только если НЕ спам!)
+                for file_content, filename, mime_type in attachments_data:
+                    safe_filename = f"{timestamp_str}_{filename}"
+                    file_path = output_dir / safe_filename
+                    
+                    try:
+                        with open(file_path, 'wb') as f:
+                            f.write(file_content)
+                        email_metadata['attachments'].append({
+                            'filename': filename,
+                            'saved_as': safe_filename,
+                            'mime_type': mime_type,
+                            'size': len(file_content)
+                        })
+                        print(f"      💾 Сохранен файл: {safe_filename}")
+                    except Exception as e:
+                        print(f"      ⚠️  Не удалось сохранить файл {filename}: {e}")
+                
                 # Сохраняем метаданные письма
                 metadata_file = output_dir / f"{timestamp_str}_metadata.json"
-                temp_metadata_file = metadata_file
                 try:
                     with open(metadata_file, 'w', encoding='utf-8') as f:
                         json.dump(email_metadata, f, ensure_ascii=False, indent=2)
-                    print(f"   ✅ Метаданные сохранены: {metadata_file.name}")
+                    print(f"      💾 Сохранены метаданные: {metadata_file.name}")
                 except Exception as e:
-                    print(f"   ⚠️  Не удалось сохранить метаданные: {e}")
+                    print(f"      ⚠️  Не удалось сохранить метаданные: {e}")
             
             return True
         else:
             print(f"   ❌ Не удалось отправить легитимное письмо")
-            # Удаляем временные файлы при ошибке отправки
-            for temp_file in temp_files:
-                try:
-                    if temp_file.exists():
-                        temp_file.unlink()
-                except:
-                    pass
             return False
         
     except Exception as e:
@@ -1271,20 +1256,13 @@ P.P.S. Готовы ответить на любые вопросы по тел�
     # Создание вредоносного Excel файла (.xlsx)
     pdf_content, filename, mime_type = create_file_attachment("excel", company, is_malicious=True)
     
-    # Временные файлы для удаления, если письмо попадет в спам
+    # Timestamp для имен файлов
     timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-    safe_filename = f"{timestamp_str}_{filename}"
-    file_path = output_dir / safe_filename
-    temp_files = [file_path]
-    temp_metadata_file = None
     
-    try:
-        with open(file_path, 'wb') as f:
-            f.write(pdf_content)
-    except Exception as e:
-        print(f"   ⚠️  Не удалось сохранить файл {filename}: {e}")
+    # Сохраняем данные в памяти (НЕ на диск до проверки спама!)
+    attachment_data = (pdf_content, filename, mime_type)
     
-    # Метаданные письма (пока не сохраняем - сохраним только после проверки спама)
+    # Метаданные письма (сохраним только после проверки спама)
     email_metadata = {
         'type': 'malicious',
         'from': sender_email,
@@ -1294,12 +1272,7 @@ P.P.S. Готовы ответить на любые вопросы по тел�
         'inn': inn,
         'phone': phone,
         'timestamp': datetime.now().isoformat(),
-        'attachments': [{
-            'filename': filename,
-            'saved_as': safe_filename,
-            'mime_type': mime_type,
-            'size': len(pdf_content)
-        }]
+        'attachments': []
     }
     
     # Добавление вложения с правильной кодировкой имени файла
@@ -1346,42 +1319,44 @@ P.P.S. Готовы ответить на любые вопросы по тел�
             
             # Проверяем, попало ли письмо в спам
             print(f"   🔍 Проверка, попало ли письмо в спам...")
-            is_spam = check_email_spam_after_send(target_email, subject, wait_seconds=5)
+            is_spam = check_email_spam_after_send(target_email, subject, wait_seconds=8)
             
             if is_spam:
-                print(f"   🚫 Письмо попало в спам - удаляем сохраненные файлы")
-                # Удаляем временные файлы
-                for temp_file in temp_files:
-                    try:
-                        if temp_file.exists():
-                            temp_file.unlink()
-                            print(f"      Удален: {temp_file.name}")
-                    except Exception as e:
-                        print(f"      ⚠️  Не удалось удалить {temp_file.name}: {e}")
-                # Не сохраняем метаданные
-                print(f"   🚫 Письмо не сохранено для автоматизации оператора (попало в спам)")
+                print(f"   🚫 Письмо попало в СПАМ - НЕ сохраняем для автоматизации оператора")
+                return True
             else:
-                print(f"   ✅ Письмо НЕ в спаме - сохраняем для автоматизации оператора")
+                print(f"   ✅ Письмо НЕ в спаме - СОХРАНЯЕМ для автоматизации оператора")
+                
+                # ТЕПЕРЬ сохраняем файл на диск (только если НЕ спам!)
+                file_content, filename, mime_type = attachment_data
+                safe_filename = f"{timestamp_str}_{filename}"
+                file_path = output_dir / safe_filename
+                
+                try:
+                    with open(file_path, 'wb') as f:
+                        f.write(file_content)
+                    email_metadata['attachments'].append({
+                        'filename': filename,
+                        'saved_as': safe_filename,
+                        'mime_type': mime_type,
+                        'size': len(file_content)
+                    })
+                    print(f"      💾 Сохранен файл: {safe_filename}")
+                except Exception as e:
+                    print(f"      ⚠️  Не удалось сохранить файл {filename}: {e}")
+                
                 # Сохраняем метаданные письма
                 metadata_file = output_dir / f"{timestamp_str}_metadata.json"
-                temp_metadata_file = metadata_file
                 try:
                     with open(metadata_file, 'w', encoding='utf-8') as f:
                         json.dump(email_metadata, f, ensure_ascii=False, indent=2)
-                    print(f"   ✅ Метаданные сохранены: {metadata_file.name}")
+                    print(f"      💾 Сохранены метаданные: {metadata_file.name}")
                 except Exception as e:
-                    print(f"   ⚠️  Не удалось сохранить метаданные: {e}")
+                    print(f"      ⚠️  Не удалось сохранить метаданные: {e}")
             
             return True
         else:
             print(f"   ❌ Не удалось отправить вредоносное письмо")
-            # Удаляем временные файлы при ошибке отправки
-            for temp_file in temp_files:
-                try:
-                    if temp_file.exists():
-                        temp_file.unlink()
-                except:
-                    pass
             return False
         
     except Exception as e:
