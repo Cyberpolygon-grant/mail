@@ -364,6 +364,109 @@ except Exception as e:
         traceback.print_exc()
         return None
 
+def get_user_spam_settings(user_email):
+    """
+    Получает все настройки спам-фильтра пользователя из базы данных Mailu.
+    Включает:
+    - Enable spam filter (включение спам-фильтра)
+    - Enable spam as readable (включение спама как читаемого)
+    - Spam-filter tolerance (толерантность спам-фильтра / spam_threshold)
+    
+    Args:
+        user_email: Email пользователя
+    
+    Returns:
+        dict: Словарь с настройками спам-фильтра или None при ошибке
+    """
+    try:
+        admin_container = os.getenv('MAILU_ADMIN_CONTAINER') or find_admin_container()
+        if not admin_container:
+            print(f"   ⚠️  Не удалось найти контейнер admin")
+            return None
+        
+        db_path = '/data/main.db'
+        
+        python_code = f"""
+import sqlite3
+import sys
+import json
+
+try:
+    db_path = '{db_path}'
+    user_email = '{user_email}'
+    
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    # Сначала получаем структуру таблицы user
+    cursor.execute('PRAGMA table_info("user")')
+    columns_info = cursor.fetchall()
+    column_names = [col[1] for col in columns_info]
+    
+    # Получаем все данные пользователя
+    cursor.execute('SELECT * FROM "user" WHERE email = ?', (user_email,))
+    result = cursor.fetchone()
+    
+    if not result:
+        print('USER_NOT_FOUND', file=sys.stderr)
+        conn.close()
+        sys.exit(1)
+    
+    # Формируем словарь с данными пользователя
+    user_data = dict(zip(column_names, result))
+    
+    # Извлекаем настройки спам-фильтра
+    spam_settings = {{
+        'email': user_data.get('email'),
+        'spam_threshold': user_data.get('spam_threshold'),
+        # Возможные поля для включения/выключения спам-фильтра
+        'spam_enabled': user_data.get('spam_enabled'),
+        'spam_mark_as_read': user_data.get('spam_mark_as_read'),
+        'spam_quarantine': user_data.get('spam_quarantine'),
+        # Альтернативные названия полей
+        'enable_spam_filter': user_data.get('enable_spam_filter'),
+        'enable_spam_as_readable': user_data.get('enable_spam_as_readable'),
+        'spam_filter_tolerance': user_data.get('spam_filter_tolerance'),
+    }}
+    
+    # Добавляем все доступные поля для отладки
+    spam_settings['_all_columns'] = column_names
+    spam_settings['_all_user_data'] = {{k: v for k, v in user_data.items() if k not in ['password', 'password_salt']}}
+    
+    print(json.dumps(spam_settings, default=str))
+    
+    conn.close()
+except Exception as e:
+    print(f'ERROR: {{str(e)}}', file=sys.stderr)
+    import traceback
+    traceback.print_exc(file=sys.stderr)
+    sys.exit(1)
+"""
+        
+        result = subprocess.run(
+            ['docker', 'exec', admin_container, 'python3', '-c', python_code],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode == 0:
+            try:
+                return json.loads(result.stdout.strip())
+            except json.JSONDecodeError:
+                print(f"   ⚠️  Ошибка парсинга JSON: {result.stdout}")
+                return None
+        else:
+            error_msg = result.stderr.strip()
+            if 'USER_NOT_FOUND' in error_msg:
+                print(f"   ⚠️  Пользователь {user_email} не найден в базе данных")
+            else:
+                print(f"   ⚠️  Ошибка получения настроек спам-фильтра: {error_msg}")
+            return None
+    except Exception as e:
+        print(f"   ⚠️  Неожиданная ошибка при получении настроек спам-фильтра: {e}")
+        return None
+
 def get_user_settings(user_email):
     """
     Получает все настройки пользователя из базы данных Mailu, включая spam_threshold.
@@ -1348,6 +1451,9 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                     else:
                         print(f"      ⚠️  Не удалось получить уровень спама пользователя из БД")
                     
+                    # Получаем все настройки спам-фильтра пользователя
+                    spam_filter_settings = get_user_spam_settings(target_email)
+                    
                     # Логируем параметры спама в send_attachments.log
                     output_dir = Path(os.getenv('ATTACHMENTS_OUTPUT_DIR', '/app/sent_attachments'))
                     spam_log_parts = [
@@ -1358,10 +1464,19 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                         f"X-Spamd-Bar: {x_spamd_bar} |",
                         f"Количество '+' в X-Spamd-Bar: {spamd_bar_plus_count}"
                     ]
+                    
+                    # Добавляем настройки спам-фильтра из БД
                     if user_spam_threshold is not None:
-                        spam_log_parts.append(f"| Уровень спама пользователя (spam_threshold): {user_spam_threshold}")
-                    else:
-                        spam_log_parts.append(f"| Уровень спама пользователя: не получен")
+                        spam_log_parts.append(f"| Spam-filter tolerance (spam_threshold): {user_spam_threshold}")
+                    
+                    if spam_filter_settings:
+                        spam_enabled = spam_filter_settings.get('spam_enabled') or spam_filter_settings.get('enable_spam_filter')
+                        if spam_enabled is not None:
+                            spam_log_parts.append(f"| Enable spam filter: {spam_enabled}")
+                        
+                        spam_readable = spam_filter_settings.get('spam_mark_as_read') or spam_filter_settings.get('enable_spam_as_readable')
+                        if spam_readable is not None:
+                            spam_log_parts.append(f"| Enable spam as readable: {spam_readable}")
                     
                     spam_log_line = " ".join(spam_log_parts)
                     append_send_attachs_log_line(output_dir, spam_log_line)
@@ -2670,26 +2785,57 @@ def mixed_phishing_attack():
     print("📊 НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ ИЗ БАЗЫ ДАННЫХ")
     print("=" * 60)
     
-    user_spam_threshold = get_user_spam_threshold(target_email)
-    if user_spam_threshold is not None:
-        print(f"✅ Уровень спама пользователя (spam_threshold): {user_spam_threshold}")
-        if user_spam_threshold == 100:
-            print(f"   ℹ️  Фильтр спама отключен (100 = фильтр отключен)")
-        elif user_spam_threshold < 100:
-            print(f"   ℹ️  Фильтр спама активен (чем меньше значение, тем строже фильтр)")
+    # Получаем все настройки спам-фильтра
+    spam_settings = get_user_spam_settings(target_email)
+    if spam_settings:
+        print(f"\n🔍 НАСТРОЙКИ СПАМ-ФИЛЬТРА:")
+        print(f"   Email: {spam_settings.get('email', 'N/A')}")
+        
+        # Spam-filter tolerance (spam_threshold)
+        spam_threshold = spam_settings.get('spam_threshold')
+        if spam_threshold is not None:
+            print(f"   ✅ Spam-filter tolerance (spam_threshold): {spam_threshold}")
+            if spam_threshold == 100:
+                print(f"      ℹ️  Фильтр спама отключен (100 = фильтр отключен)")
+            elif spam_threshold < 100:
+                print(f"      ℹ️  Фильтр спама активен (чем меньше значение, тем строже фильтр)")
+        else:
+            print(f"   ⚠️  Spam-filter tolerance: не установлен")
+        
+        # Enable spam filter
+        spam_enabled = spam_settings.get('spam_enabled') or spam_settings.get('enable_spam_filter')
+        if spam_enabled is not None:
+            print(f"   ✅ Enable spam filter: {spam_enabled}")
+        else:
+            print(f"   ⚠️  Enable spam filter: поле не найдено в БД")
+        
+        # Enable spam as readable
+        spam_readable = spam_settings.get('spam_mark_as_read') or spam_settings.get('enable_spam_as_readable')
+        if spam_readable is not None:
+            print(f"   ✅ Enable spam as readable: {spam_readable}")
+        else:
+            print(f"   ⚠️  Enable spam as readable: поле не найдено в БД")
+        
+        # Выводим все доступные колонки для отладки
+        all_columns = spam_settings.get('_all_columns', [])
+        spam_related_columns = [col for col in all_columns if 'spam' in col.lower()]
+        if spam_related_columns:
+            print(f"\n   📋 Все поля, связанные со спамом в таблице user:")
+            for col in spam_related_columns:
+                value = spam_settings.get('_all_user_data', {}).get(col, 'N/A')
+                print(f"      - {col}: {value}")
+        
+        print(f"\n   💡 Все доступные колонки таблицы user ({len(all_columns)}):")
+        print(f"      {', '.join(all_columns[:10])}")
+        if len(all_columns) > 10:
+            print(f"      ... и ещё {len(all_columns) - 10} колонок")
     else:
-        print(f"⚠️  Не удалось получить уровень спама пользователя из БД")
-    
-    # Опционально: получаем все настройки пользователя для отладки
-    user_settings = get_user_settings(target_email)
-    if user_settings:
-        print(f"\n📋 Все настройки пользователя из БД:")
-        print(f"   Email: {user_settings.get('email', 'N/A')}")
-        print(f"   Spam threshold: {user_settings.get('spam_threshold', 'N/A')}")
-        print(f"   Quota: {user_settings.get('quota_bytes', 'N/A')}")
-        print(f"   Enabled: {user_settings.get('enabled', 'N/A')}")
-    else:
-        print(f"⚠️  Не удалось получить настройки пользователя из БД")
+        print(f"⚠️  Не удалось получить настройки спам-фильтра из БД")
+        
+        # Fallback: пробуем получить только spam_threshold
+        user_spam_threshold = get_user_spam_threshold_cached(target_email)
+        if user_spam_threshold is not None:
+            print(f"✅ Уровень спама пользователя (spam_threshold): {user_spam_threshold}")
     
     print("=" * 60 + "\n")
     
