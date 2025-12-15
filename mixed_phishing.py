@@ -698,18 +698,25 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
     max_retries = 3
     retry_delay = 2
     
+    # Получаем параметры подключения из переменных окружения или используем значения по умолчанию
+    imap_server = os.getenv('IMAP_SERVER', 'imap')  # Имя сервиса в Docker сети
+    imap_port = int(os.getenv('IMAP_PORT', '143'))  # Внутренний порт контейнера imap
+    imap_user = os.getenv('TARGET_EMAIL', 'operator1@financepro.ru')
+    imap_password = os.getenv('IMAP_PASSWORD', '1q2w#E$R')
+    
     # Попытки подключения с retry
     for attempt in range(max_retries):
         try:
-            # Подключение к IMAP (как в test.py)
+            # Подключение к IMAP через имя сервиса в Docker сети
             if attempt > 0:
                 print(f"   🔄 Повторная попытка подключения к IMAP ({attempt + 1}/{max_retries})...")
                 time.sleep(retry_delay)
             else:
                 print(f"   🔍 Подключение к IMAP для проверки заголовков...")
+                print(f"      Сервер: {imap_server}:{imap_port}")
             
-            mail = imaplib.IMAP4('localhost', 1143)  # Прямой доступ к dovecot
-            mail.login('operator1@financepro.ru', '1q2w#E$R')
+            mail = imaplib.IMAP4(imap_server, imap_port)  # Подключение к контейнеру imap через Docker сеть
+            mail.login(imap_user, imap_password)
             print(f"   ✅ Подключение к IMAP успешно!")
             break  # Успешное подключение, выходим из цикла retry
             
