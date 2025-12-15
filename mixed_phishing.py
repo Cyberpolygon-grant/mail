@@ -667,195 +667,125 @@ def check_email_spam_in_container(container_name, maildir_path, target_email, su
 
 def check_email_spam_after_send(target_email, subject, message_id=None, wait_seconds=8):
     """
-    ПРОСТАЯ проверка: подключается к контейнеру imap через docker exec и ищет письмо.
-    Если письмо в папке спам → СПАМ.
-    Если письмо в INBOX → проверяем заголовки X-Spam.
+    ПРОСТАЯ проверка: находит письмо в maildir и проверяет заголовок X-Spam: Yes
+    Если X-Spam: Yes → СПАМ (не сохраняем)
+    Если X-Spam: No или нет заголовка → НЕ спам (сохраняем)
     """
     info = {
         "message_id": message_id,
         "found_in": None,
         "found_path": None,
         "reason": None,
+        "x_spam_header": None,
     }
     
-    # Ждем обработки
-    print(f"   ⏳ Ожидание {wait_seconds} сек...")
+    # Ждем обработки rspamd
+    print(f"   ⏳ Ожидание {wait_seconds} сек для обработки rspamd...")
     time.sleep(wait_seconds)
     
-    # Ищем контейнер imap/dovecot
     try:
-        result = subprocess.run(
-            ['docker', 'ps', '--format', '{{.Names}}'],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        
-        if result.returncode != 0:
-            print(f"   ⚠️  Не могу получить список контейнеров")
-            info["reason"] = "docker_ps_failed"
-            return (False, info)
-        
-        containers = [name.strip() for name in result.stdout.strip().split('\n') if name.strip()]
-        
-        # Ищем контейнер с imap/dovecot
-        imap_container = None
-        for name in containers:
-            if 'imap' in name.lower() or 'dovecot' in name.lower():
-                imap_container = name
-                break
-        
-        if not imap_container:
-            print(f"   ⚠️  Контейнер imap/dovecot не найден")
-            info["reason"] = "imap_container_not_found"
-            return (False, info)
-        
-        print(f"   🔍 Проверяю в контейнере: {imap_container}")
-        
-        # Путь к maildir пользователя
         mail_domain = os.getenv('MAIL_DOMAIN', 'financepro.ru')
         local_part = target_email.split('@')[0] if '@' in target_email else target_email
         
-        # Пробуем найти maildir пользователя
-        maildir_paths = [
-            f"/mail/{mail_domain}/{local_part}",
-            f"/mailu/mail/{mail_domain}/{local_part}",
-        ]
+        # Путь к maildir пользователя
+        user_maildir = Path('/mailu/mail') / mail_domain / local_part
         
-        user_maildir = None
-        for path in maildir_paths:
-            check = subprocess.run(
-                ['docker', 'exec', imap_container, 'test', '-d', path],
-                capture_output=True,
-                timeout=3
-            )
-            if check.returncode == 0:
-                user_maildir = path
-                print(f"   ✅ Найден maildir: {path}")
-                break
+        print(f"   🔍 Ищу письмо в maildir: {user_maildir}")
         
-        if not user_maildir:
-            print(f"   ⚠️  Maildir пользователя не найден")
+        if not user_maildir.exists():
+            print(f"   ⚠️  Maildir не найден: {user_maildir}")
             info["reason"] = "user_maildir_not_found"
             return (False, info)
         
-        # Ищем папки спам
-        find_spam = subprocess.run(
-            ['docker', 'exec', imap_container, 'find', user_maildir, '-type', 'd', 
-             '(', '-name', '*spam*', '-o', '-name', '*Spam*', '-o', '-name', '*junk*', '-o', '-name', '*Junk*', ')'],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
+        # Ищем письмо во всех подпапках (INBOX, Spam, и т.д.)
+        search_dirs = []
         
-        spam_folders = []
-        if find_spam.returncode == 0 and find_spam.stdout.strip():
-            spam_folders = [f.strip() for f in find_spam.stdout.strip().split('\n') if f.strip()]
-            print(f"   🚫 Найдены спам-папки: {spam_folders}")
+        # Добавляем INBOX
+        for subdir in ['new', 'cur']:
+            inbox_path = user_maildir / subdir
+            if inbox_path.exists():
+                search_dirs.append(inbox_path)
         
-        # Ищем письмо в спам-папках
-        if spam_folders:
-            for spam_folder in spam_folders:
-                for subdir in ['new', 'cur']:
-                    spam_dir = f"{spam_folder}/{subdir}"
-                    # Ищем недавние файлы
-                    find_files = subprocess.run(
-                        ['docker', 'exec', imap_container, 'find', spam_dir, '-type', 'f', '-mmin', '-15'],
-                        capture_output=True,
-                        text=True,
-                        timeout=5
-                    )
+        # Добавляем все папки (включая спам)
+        try:
+            for item in user_maildir.iterdir():
+                if item.is_dir():
+                    for subdir in ['new', 'cur']:
+                        folder_path = item / subdir
+                        if folder_path.exists():
+                            search_dirs.append(folder_path)
+        except:
+            pass
+        
+        print(f"   📁 Проверяю {len(search_dirs)} директорий...")
+        
+        current_time = time.time()
+        subject_lower = (subject or "").lower()
+        msgid_clean = message_id.strip().strip('<>') if message_id else None
+        
+        # Ищем письмо по Message-ID или теме
+        for search_dir in search_dirs:
+            try:
+                for email_file in search_dir.iterdir():
+                    if not email_file.is_file():
+                        continue
                     
-                    if find_files.returncode == 0 and find_files.stdout.strip():
-                        files = [f.strip() for f in find_files.stdout.strip().split('\n') if f.strip()]
-                        for email_file in files[:20]:
-                            try:
-                                cat = subprocess.run(
-                                    ['docker', 'exec', imap_container, 'cat', email_file],
-                                    capture_output=True,
-                                    text=True,
-                                    timeout=3
-                                )
-                                
-                                if cat.returncode == 0:
-                                    content = cat.stdout
-                                    # Проверяем Message-ID
-                                    if message_id:
-                                        msgid_clean = message_id.strip().strip('<>')
-                                        if msgid_clean in content or message_id in content:
-                                            print(f"   🚫 Письмо найдено в СПАМ-папке: {email_file}")
-                                            info["found_in"] = "spam_folder"
-                                            info["found_path"] = email_file
-                                            info["reason"] = "found_in_spam_folder"
-                                            return (True, info)
-                                    
-                                    # Проверяем тему
-                                    if subject and subject[:50].lower() in content.lower():
-                                        print(f"   🚫 Письмо найдено в СПАМ-папке: {email_file}")
-                                        info["found_in"] = "spam_folder"
-                                        info["found_path"] = email_file
-                                        info["reason"] = "found_in_spam_folder"
-                                        return (True, info)
-                            except:
-                                continue
-        
-        # Ищем письмо в INBOX
-        for inbox_subdir in ['new', 'cur']:
-            inbox_dir = f"{user_maildir}/{inbox_subdir}"
-            find_inbox = subprocess.run(
-                ['docker', 'exec', imap_container, 'find', inbox_dir, '-type', 'f', '-mmin', '-15'],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            
-            if find_inbox.returncode == 0 and find_inbox.stdout.strip():
-                files = [f.strip() for f in find_inbox.stdout.strip().split('\n') if f.strip()]
-                for email_file in files[:20]:
+                    # Проверяем время модификации (за последние 20 минут)
                     try:
-                        cat = subprocess.run(
-                            ['docker', 'exec', imap_container, 'cat', email_file],
-                            capture_output=True,
-                            text=True,
-                            timeout=3
-                        )
-                        
-                        if cat.returncode == 0:
-                            content = cat.stdout
-                            match = False
-                            
-                            # Проверяем Message-ID
-                            if message_id:
-                                msgid_clean = message_id.strip().strip('<>')
-                                if msgid_clean in content or message_id in content:
-                                    match = True
-                            
-                            # Проверяем тему
-                            if not match and subject and subject[:50].lower() in content.lower():
-                                match = True
-                            
-                            if match:
-                                # Проверяем заголовки X-Spam
-                                is_spam = False
-                                if ('X-Spam-Flag: Yes' in content or 
-                                    'X-Spam: Yes' in content or
-                                    ('X-Spam-Status:' in content and 'Yes' in content.split('X-Spam-Status:')[1].split('\n')[0])):
-                                    is_spam = True
-                                
-                                if is_spam:
-                                    print(f"   🚫 Письмо в INBOX, но заголовки X-Spam = СПАМ: {email_file}")
-                                    info["found_in"] = "inbox"
-                                    info["found_path"] = email_file
-                                    info["reason"] = "spam_headers_in_inbox"
-                                    return (True, info)
-                                else:
-                                    print(f"   ✅ Письмо в INBOX, не спам: {email_file}")
-                                    info["found_in"] = "inbox"
-                                    info["found_path"] = email_file
-                                    info["reason"] = "found_in_inbox_not_spam"
-                                    return (False, info)
+                        file_mtime = email_file.stat().st_mtime
+                        if current_time - file_mtime > 1200:  # 20 минут
+                            continue
                     except:
                         continue
+                    
+                    # Читаем файл и парсим заголовки
+                    try:
+                        with open(email_file, 'rb') as f:
+                            msg = email.message_from_bytes(f.read())
+                        
+                        # Проверяем совпадение письма
+                        match = False
+                        
+                        # 1. По Message-ID (приоритет)
+                        if msgid_clean:
+                            msg_msgid = (msg.get('Message-ID', '') or '').strip().strip('<>')
+                            if msg_msgid == msgid_clean:
+                                match = True
+                        
+                        # 2. По теме (fallback)
+                        if not match and subject:
+                            msg_subject = decode_mime_words(msg.get('Subject', '')).lower()
+                            if subject_lower[:50] in msg_subject or msg_subject[:50] in subject_lower:
+                                match = True
+                        
+                        if match:
+                            # НАШЛИ ПИСЬМО! Проверяем заголовок X-Spam
+                            x_spam = msg.get('X-Spam', '').strip()
+                            info["x_spam_header"] = x_spam
+                            info["found_path"] = str(email_file)
+                            
+                            # Определяем в какой папке нашли
+                            if 'spam' in str(email_file).lower() or 'junk' in str(email_file).lower():
+                                info["found_in"] = "spam_folder"
+                            else:
+                                info["found_in"] = "inbox"
+                            
+                            print(f"   ✅ Письмо найдено: {email_file.name}")
+                            print(f"      X-Spam заголовок: '{x_spam}'")
+                            
+                            # ПРОСТАЯ ПРОВЕРКА: если X-Spam: Yes → СПАМ
+                            if x_spam and x_spam.strip().upper() == 'YES':
+                                print(f"   🚫 РЕШЕНИЕ: X-Spam: Yes → ПИСЬМО ЯВЛЯЕТСЯ СПАМОМ")
+                                info["reason"] = "x_spam_yes"
+                                return (True, info)
+                            else:
+                                print(f"   ✅ РЕШЕНИЕ: X-Spam != Yes → ПИСЬМО НЕ ЯВЛЯЕТСЯ СПАМОМ")
+                                info["reason"] = "x_spam_no_or_missing"
+                                return (False, info)
+                    except Exception as e:
+                        continue
+            except Exception as e:
+                continue
         
         print(f"   ⚠️  Письмо не найдено в maildir")
         info["reason"] = "email_not_found"
