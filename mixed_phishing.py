@@ -102,14 +102,29 @@ def log_send_attachs_action(output_dir: Path, action: str, meta: dict):
             decision = f"❓ {action}"
             reason = "Неизвестное действие"
         
+        # Получаем дополнительные данные о спаме из spam_check
+        spamd_bar_plus_count = spam_check.get("spamd_bar_plus_count")
+        user_spam_threshold = spam_check.get("user_spam_threshold")
+        x_spamd_bar = spam_check.get("x_spamd_bar", "")
+        
         # Формируем строку лога
-        log_line = (
-            f"{decision} | "
-            f"Тип: {msg_type} | "
-            f"Тема: {subject[:60]} | "
-            f"Причина: {reason} | "
+        log_parts = [
+            decision,
+            f"Тип: {msg_type}",
+            f"Тема: {subject[:60]}",
+            f"Причина: {reason}",
             f"Файлов сохранено: {len(saved_files)}/{len(planned)}"
-        )
+        ]
+        
+        # Добавляем информацию о спаме, если доступна
+        if spamd_bar_plus_count is not None:
+            log_parts.append(f"X-Spamd-Bar '+' знаков: {spamd_bar_plus_count}")
+        if x_spamd_bar:
+            log_parts.append(f"X-Spamd-Bar: {x_spamd_bar}")
+        if user_spam_threshold is not None:
+            log_parts.append(f"Уровень спама пользователя: {user_spam_threshold}")
+        
+        log_line = " | ".join(log_parts)
         
         append_send_attachs_log_line(output_dir, log_line)
         print(f"   🧾 send_attachs log: {decision} -> {log_path.name} (+ {ATTACHMENTS_TEXT_LOG})")
@@ -129,6 +144,231 @@ def decode_mime_words(s):
         else:
             decoded_parts.append(fragment)
     return ''.join(decoded_parts)
+
+def find_admin_container():
+    """
+    Находит имя контейнера admin в Docker.
+    Returns:
+        str или None: Имя контейнера admin
+    """
+    try:
+        # Ищем контейнер admin через docker ps
+        result = subprocess.run(
+            ['docker', 'ps', '--format', '{{.Names}}', '--filter', 'name=admin'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        
+        if result.returncode == 0:
+            containers = [c.strip() for c in result.stdout.strip().split('\n') if c.strip()]
+            if containers:
+                return containers[0]  # Возвращаем первый найденный контейнер admin
+        return None
+    except Exception:
+        return None
+
+def get_user_spam_threshold(user_email):
+    """
+    Получает уровень спама (spam_threshold) пользователя из базы данных Mailu.
+    Возвращает значение порога спама или None в случае ошибки.
+    
+    Args:
+        user_email: Email пользователя (например, 'operator1@financepro.ru')
+    
+    Returns:
+        int или None: Порог спама пользователя (100 = фильтр отключен)
+    """
+    try:
+        # Находим контейнер admin автоматически или используем переменную окружения
+        admin_container = os.getenv('MAILU_ADMIN_CONTAINER') or find_admin_container()
+        if not admin_container:
+            print(f"   ⚠️  Не удалось найти контейнер admin")
+            return None
+        
+        db_path = '/data/main.db'
+        
+        # SQL запрос для получения spam_threshold пользователя
+        python_code = f"""
+import sqlite3
+import sys
+
+try:
+    db_path = '{db_path}'
+    user_email = '{user_email}'
+    
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    # Получаем spam_threshold пользователя
+    cursor.execute('SELECT spam_threshold FROM "user" WHERE email = ?', (user_email,))
+    result = cursor.fetchone()
+    
+    conn.close()
+    
+    if result:
+        print(result[0])
+    else:
+        print('USER_NOT_FOUND', file=sys.stderr)
+        sys.exit(1)
+except Exception as e:
+    print(f'ERROR: {{str(e)}}', file=sys.stderr)
+    sys.exit(1)
+"""
+        
+        # Выполняем команду через docker exec
+        result = subprocess.run(
+            ['docker', 'exec', admin_container, 'python3', '-c', python_code],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode == 0:
+            threshold_str = result.stdout.strip()
+            try:
+                threshold = int(threshold_str)
+                return threshold
+            except ValueError:
+                print(f"   ⚠️  Не удалось преобразовать spam_threshold в число: {threshold_str}")
+                return None
+        else:
+            error_msg = result.stderr.strip()
+            if 'USER_NOT_FOUND' in error_msg:
+                print(f"   ⚠️  Пользователь {user_email} не найден в базе данных")
+            else:
+                print(f"   ⚠️  Ошибка получения spam_threshold: {error_msg}")
+            return None
+            
+    except subprocess.TimeoutExpired:
+        print(f"   ⚠️  Таймаут при получении spam_threshold из базы данных")
+        return None
+    except FileNotFoundError:
+        print(f"   ⚠️  Docker не найден или контейнер {admin_container} недоступен")
+        return None
+    except Exception as e:
+        print(f"   ⚠️  Неожиданная ошибка при получении spam_threshold: {e}")
+        return None
+
+def track_spam_threshold_changes(user_email, output_dir=None):
+    """
+    Отслеживает изменения уровня спама пользователя и логирует их.
+    
+    Args:
+        user_email: Email пользователя
+        output_dir: Директория для сохранения лога (по умолчанию /app/sent_attachments)
+    
+    Returns:
+        dict: Информация о текущем уровне спама и изменениях
+    """
+    if output_dir is None:
+        output_dir = Path(os.getenv('ATTACHMENTS_OUTPUT_DIR', '/app/sent_attachments'))
+    
+    current_threshold = get_user_spam_threshold(user_email)
+    
+    # Файл для отслеживания изменений
+    threshold_log_file = output_dir / "spam_threshold_changes.jsonl"
+    threshold_state_file = output_dir / "spam_threshold_state.json"
+    
+    info = {
+        "user_email": user_email,
+        "current_threshold": current_threshold,
+        "timestamp": now_moscow().isoformat(),
+        "changed": False,
+        "previous_threshold": None,
+    }
+    
+    # Читаем предыдущее состояние
+    previous_threshold = None
+    if threshold_state_file.exists():
+        try:
+            with open(threshold_state_file, 'r', encoding='utf-8') as f:
+                state = json.load(f)
+                previous_threshold = state.get(user_email)
+        except Exception as e:
+            print(f"   ⚠️  Ошибка чтения состояния threshold: {e}")
+    
+    # Проверяем изменения
+    if previous_threshold is not None and current_threshold != previous_threshold:
+        info["changed"] = True
+        info["previous_threshold"] = previous_threshold
+        
+        # Логируем изменение
+        change_record = {
+            "timestamp": now_moscow().isoformat(),
+            "user_email": user_email,
+            "previous_threshold": previous_threshold,
+            "new_threshold": current_threshold,
+            "change": current_threshold - previous_threshold if current_threshold and previous_threshold else None,
+        }
+        
+        try:
+            threshold_log_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(threshold_log_file, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(change_record, ensure_ascii=False) + "\n")
+            
+            print(f"   📊 Изменение уровня спама для {user_email}:")
+            print(f"      Было: {previous_threshold}")
+            print(f"      Стало: {current_threshold}")
+            if change_record["change"]:
+                change_str = f"+{change_record['change']}" if change_record['change'] > 0 else str(change_record['change'])
+                print(f"      Изменение: {change_str}")
+        except Exception as e:
+            print(f"   ⚠️  Ошибка логирования изменения threshold: {e}")
+    
+    # Сохраняем текущее состояние
+    state = {}
+    if threshold_state_file.exists():
+        try:
+            with open(threshold_state_file, 'r', encoding='utf-8') as f:
+                state = json.load(f)
+        except Exception:
+            pass
+    
+    state[user_email] = current_threshold
+    
+    try:
+        threshold_state_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(threshold_state_file, 'w', encoding='utf-8') as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"   ⚠️  Ошибка сохранения состояния threshold: {e}")
+    
+    return info
+
+def get_user_spam_threshold_cached(user_email, cache_duration=300):
+    """
+    Получает уровень спама пользователя с кэшированием результатов.
+    Кэш обновляется каждые cache_duration секунд (по умолчанию 5 минут).
+    
+    Args:
+        user_email: Email пользователя
+        cache_duration: Длительность кэша в секундах
+    
+    Returns:
+        int или None: Порог спама пользователя
+    """
+    # Простое кэширование в памяти (можно улучшить, используя более продвинутый кэш)
+    if not hasattr(get_user_spam_threshold_cached, '_cache'):
+        get_user_spam_threshold_cached._cache = {}
+    
+    cache_key = user_email
+    current_time = time.time()
+    
+    # Проверяем кэш
+    if cache_key in get_user_spam_threshold_cached._cache:
+        cached_value, cached_time = get_user_spam_threshold_cached._cache[cache_key]
+        if current_time - cached_time < cache_duration:
+            return cached_value
+    
+    # Получаем значение из базы данных
+    threshold = get_user_spam_threshold(user_email)
+    
+    # Сохраняем в кэш
+    if threshold is not None:
+        get_user_spam_threshold_cached._cache[cache_key] = (threshold, current_time)
+    
+    return threshold
 
 # Функция проверки спама через заголовки
 def check_email_is_spam(msg):
@@ -805,15 +1045,28 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                     x_spam_level = email_message.get('X-Spam-Level', '').strip()
                     x_spamd_bar = email_message.get('X-Spamd-Bar', '').strip()
                     
+                    # Подсчитываем количество '+' в X-Spamd-Bar
+                    spamd_bar_plus_count = x_spamd_bar.count('+') if x_spamd_bar else 0
+                    
+                    # Получаем уровень спама пользователя из базы данных
+                    user_spam_threshold = get_user_spam_threshold_cached(target_email)
+                    
                     info["x_spam_header"] = x_spam
                     info["x_spam_level"] = x_spam_level
                     info["x_spamd_bar"] = x_spamd_bar
+                    info["spamd_bar_plus_count"] = spamd_bar_plus_count
+                    info["user_spam_threshold"] = user_spam_threshold
                     info["found_in"] = "imap_inbox"
                     
                     print(f"   ✅ Письмо найдено через IMAP")
                     print(f"      X-Spam: '{x_spam}'")
                     print(f"      X-Spam-Level: '{x_spam_level}'")
                     print(f"      X-Spamd-Bar: '{x_spamd_bar}'")
+                    print(f"      Количество '+' в X-Spamd-Bar: {spamd_bar_plus_count}")
+                    if user_spam_threshold is not None:
+                        print(f"      Уровень спама пользователя (spam_threshold): {user_spam_threshold}")
+                    else:
+                        print(f"      ⚠️  Не удалось получить уровень спама пользователя из БД")
                     
                     # ПРОВЕРКА: если X-Spam: Yes → СПАМ (не сохраняем)
                     if x_spam and x_spam.strip().upper() == 'YES':
