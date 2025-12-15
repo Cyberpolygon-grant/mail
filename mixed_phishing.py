@@ -148,11 +148,12 @@ def decode_mime_words(s):
 def find_admin_container():
     """
     Находит имя контейнера admin в Docker.
+    Пробует несколько способов поиска.
     Returns:
         str или None: Имя контейнера admin
     """
     try:
-        # Ищем контейнер admin через docker ps
+        # Способ 1: Ищем через docker ps по имени
         result = subprocess.run(
             ['docker', 'ps', '--format', '{{.Names}}', '--filter', 'name=admin'],
             capture_output=True,
@@ -164,8 +165,41 @@ def find_admin_container():
             containers = [c.strip() for c in result.stdout.strip().split('\n') if c.strip()]
             if containers:
                 return containers[0]  # Возвращаем первый найденный контейнер admin
+        
+        # Способ 2: Ищем через docker compose ps (если используется compose)
+        try:
+            result = subprocess.run(
+                ['docker', 'compose', 'ps', '--format', 'json', 'admin'],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=os.getcwd()
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                import json
+                containers = json.loads(result.stdout.strip())
+                if isinstance(containers, list) and len(containers) > 0:
+                    return containers[0].get('Name') or containers[0].get('name')
+        except:
+            pass
+        
+        # Способ 3: Ищем все контейнеры и фильтруем по имени
+        result = subprocess.run(
+            ['docker', 'ps', '--format', '{{.Names}}'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        
+        if result.returncode == 0:
+            containers = [c.strip() for c in result.stdout.strip().split('\n') if c.strip()]
+            for container in containers:
+                if 'admin' in container.lower():
+                    return container
+        
         return None
-    except Exception:
+    except Exception as e:
+        print(f"   ⚠️  Ошибка поиска контейнера admin: {e}")
         return None
 
 def get_user_spam_threshold(user_email):
@@ -195,13 +229,30 @@ def get_user_spam_threshold(user_email):
 import sqlite3
 import sys
 import json
+import os
 
 try:
     db_path = '{db_path}'
     user_email = '{user_email}'
     
+    # Проверяем существование файла БД
+    if not os.path.exists(db_path):
+        print(f'DB_NOT_FOUND: {{db_path}}', file=sys.stderr)
+        sys.exit(1)
+    
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
+    
+    # Сначала проверяем структуру таблицы user
+    cursor.execute("PRAGMA table_info(\\"user\\")")
+    columns = cursor.fetchall()
+    column_names = [col[1] for col in columns]
+    
+    # Проверяем наличие поля spam_threshold
+    if 'spam_threshold' not in column_names:
+        print(f'COLUMN_NOT_FOUND: spam_threshold. Available columns: {{", ".join(column_names)}}', file=sys.stderr)
+        conn.close()
+        sys.exit(1)
     
     # Получаем spam_threshold пользователя из таблицы user
     # Это значение соответствует настройке в веб-интерфейсе /admin/user/settings
@@ -213,12 +264,20 @@ try:
         # Возвращаем значение как JSON для надежности
         print(json.dumps({{'spam_threshold': threshold}}))
     else:
-        print('USER_NOT_FOUND', file=sys.stderr)
+        # Проверяем, существует ли пользователь вообще
+        cursor.execute('SELECT email FROM "user" WHERE email = ?', (user_email,))
+        user_exists = cursor.fetchone()
+        if not user_exists:
+            print('USER_NOT_FOUND', file=sys.stderr)
+        else:
+            print('SPAM_THRESHOLD_NULL', file=sys.stderr)
         sys.exit(1)
     
     conn.close()
 except Exception as e:
     print(f'ERROR: {{str(e)}}', file=sys.stderr)
+    import traceback
+    traceback.print_exc(file=sys.stderr)
     sys.exit(1)
 """
         
@@ -233,38 +292,76 @@ except Exception as e:
         if result.returncode == 0:
             try:
                 # Парсим JSON ответ
-                data = json.loads(result.stdout.strip())
+                output = result.stdout.strip()
+                if not output:
+                    print(f"   ⚠️  Пустой ответ от базы данных")
+                    return None
+                
+                data = json.loads(output)
                 threshold = data.get('spam_threshold')
                 if threshold is not None:
                     return int(threshold)
                 else:
-                    print(f"   ⚠️  spam_threshold не найден в ответе")
+                    print(f"   ⚠️  spam_threshold не найден в ответе: {data}")
                     return None
             except (json.JSONDecodeError, ValueError) as e:
                 # Fallback: пытаемся прочитать как число напрямую
                 threshold_str = result.stdout.strip()
                 try:
                     threshold = int(threshold_str)
+                    print(f"   ℹ️  Получено значение напрямую (не JSON): {threshold}")
                     return threshold
                 except ValueError:
                     print(f"   ⚠️  Не удалось преобразовать spam_threshold в число: {threshold_str}")
+                    print(f"   ⚠️  Ошибка парсинга JSON: {e}")
                     return None
         else:
             error_msg = result.stderr.strip()
+            stdout_msg = result.stdout.strip()
+            
+            # Детальная диагностика ошибок
             if 'USER_NOT_FOUND' in error_msg:
                 print(f"   ⚠️  Пользователь {user_email} не найден в базе данных")
+                print(f"   💡 Проверьте, что пользователь существует в Mailu")
+            elif 'DB_NOT_FOUND' in error_msg:
+                db_path_from_error = error_msg.split('DB_NOT_FOUND:')[1].strip() if 'DB_NOT_FOUND:' in error_msg else db_path
+                print(f"   ⚠️  База данных не найдена: {db_path_from_error}")
+                print(f"   💡 Проверьте путь к базе данных в контейнере {admin_container}")
+            elif 'COLUMN_NOT_FOUND' in error_msg:
+                print(f"   ⚠️  Поле spam_threshold не найдено в таблице user")
+                if 'Available columns:' in error_msg:
+                    available = error_msg.split('Available columns:')[1].strip()
+                    print(f"   💡 Доступные колонки: {available}")
+                print(f"   💡 Возможно, используется другая версия Mailu с другой структурой БД")
+            elif 'SPAM_THRESHOLD_NULL' in error_msg:
+                print(f"   ⚠️  Пользователь найден, но spam_threshold = NULL")
+                print(f"   💡 Значение не установлено, используйте значение по умолчанию")
+            elif 'ERROR:' in error_msg:
+                error_detail = error_msg.replace('ERROR:', '').strip()
+                print(f"   ⚠️  Ошибка выполнения SQL запроса: {error_detail}")
+                print(f"   💡 Проверьте доступность базы данных и структуру таблицы")
             else:
-                print(f"   ⚠️  Ошибка получения spam_threshold: {error_msg}")
+                print(f"   ⚠️  Ошибка получения spam_threshold")
+                print(f"   ⚠️  stderr: {error_msg}")
+                if stdout_msg:
+                    print(f"   ⚠️  stdout: {stdout_msg}")
+                print(f"   💡 Контейнер: {admin_container}, БД: {db_path}")
+            
             return None
             
     except subprocess.TimeoutExpired:
         print(f"   ⚠️  Таймаут при получении spam_threshold из базы данных")
+        print(f"   💡 Проверьте доступность контейнера admin")
         return None
     except FileNotFoundError:
-        print(f"   ⚠️  Docker не найден или контейнер {admin_container} недоступен")
+        print(f"   ⚠️  Docker не найден или недоступен")
+        print(f"   💡 Убедитесь, что Docker запущен и доступен")
         return None
     except Exception as e:
         print(f"   ⚠️  Неожиданная ошибка при получении spam_threshold: {e}")
+        import traceback
+        print(f"   💡 Детали ошибки:")
+        traceback.print_exc()
         return None
 
 def get_user_settings(user_email):
@@ -483,7 +580,7 @@ def track_spam_threshold_changes(user_email, output_dir=None):
     
     return info
 
-def get_user_spam_threshold_cached(user_email, cache_duration=300):
+def get_user_spam_threshold_cached(user_email, cache_duration=300, use_default=True):
     """
     Получает уровень спама пользователя с кэшированием результатов.
     Кэш обновляется каждые cache_duration секунд (по умолчанию 5 минут).
@@ -491,10 +588,14 @@ def get_user_spam_threshold_cached(user_email, cache_duration=300):
     Args:
         user_email: Email пользователя
         cache_duration: Длительность кэша в секундах
+        use_default: Использовать значение по умолчанию (100) если не удалось получить из БД
     
     Returns:
-        int или None: Порог спама пользователя
+        int: Порог спама пользователя (по умолчанию 100 если не удалось получить)
     """
+    # Значение по умолчанию из mailu.env (100 = фильтр отключен)
+    DEFAULT_THRESHOLD = 100
+    
     # Простое кэширование в памяти (можно улучшить, используя более продвинутый кэш)
     if not hasattr(get_user_spam_threshold_cached, '_cache'):
         get_user_spam_threshold_cached._cache = {}
@@ -511,7 +612,12 @@ def get_user_spam_threshold_cached(user_email, cache_duration=300):
     # Получаем значение из базы данных
     threshold = get_user_spam_threshold(user_email)
     
-    # Сохраняем в кэш
+    # Если не удалось получить из БД, используем значение по умолчанию
+    if threshold is None and use_default:
+        threshold = DEFAULT_THRESHOLD
+        print(f"   ℹ️  Используется значение по умолчанию: {threshold} (фильтр отключен)")
+    
+    # Сохраняем в кэш (даже если это значение по умолчанию)
     if threshold is not None:
         get_user_spam_threshold_cached._cache[cache_key] = (threshold, current_time)
     
