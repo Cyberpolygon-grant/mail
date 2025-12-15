@@ -34,10 +34,15 @@ services:
       - SMTP_SERVER=front
       - SMTP_PORT=25
       - ATTACHMENTS_OUTPUT_DIR=/app/sent_attachments
+      # Настройки IMAP для проверки спама
+      - IMAP_HOST=imap
+      - IMAP_PORT=143
+      - IMAP_PASSWORD=1q2w#E$R
     networks:
       - default
     depends_on:
       - front
+      - imap
     volumes:
       - "./sent_attachments:/app/sent_attachments"
     # Временное решение: запуск с правами root для записи в volume
