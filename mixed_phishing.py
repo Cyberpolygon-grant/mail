@@ -721,7 +721,7 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
         # Выбираем INBOX
         mail.select('INBOX')
         
-        # Ищем письмо по Message-ID (приоритет) или теме
+        # Ищем письмо по Message-ID (приоритет) или по дате
         search_criteria = []
         
         # Message-ID - самый надежный способ поиска (всегда ASCII)
@@ -729,12 +729,9 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
             msgid_clean = message_id.strip().strip('<>')
             search_criteria.append(f'HEADER Message-ID "{msgid_clean}"')
         
-        # Поиск по теме (только если нет Message-ID или как fallback)
-        if subject and not message_id:
-            # Для темы с кириллицей: пробуем найти недавние письма и проверить тему вручную
-            # Используем поиск по дате (последние письма)
+        # Если нет Message-ID, ищем недавние письма (за последний час)
+        if not message_id:
             try:
-                # Ищем письма за последний час
                 import datetime
                 date_since = (datetime.datetime.now() - datetime.timedelta(hours=1)).strftime('%d-%b-%Y')
                 search_criteria.append(f'SINCE {date_since}')
@@ -746,7 +743,7 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
             info["reason"] = "no_search_criteria"
             return (False, info)
         
-        # Ищем письмо
+        # Ищем письмо (запрос всегда в ASCII, безопасно)
         search_query = ' '.join(search_criteria) if len(search_criteria) == 1 else ' OR '.join(search_criteria)
         typ, data = mail.search(None, search_query)
         
@@ -769,34 +766,54 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
         msgid_clean = message_id.strip().strip('<>') if message_id else None
         
         for email_id in email_ids:
-            # Получаем заголовки для проверки
-            typ, msg_data = mail.fetch(email_id, '(RFC822.HEADER)')
-            if typ != 'OK' or not msg_data:
+            try:
+                # Получаем заголовки для проверки
+                typ, msg_data = mail.fetch(email_id, '(RFC822.HEADER)')
+                if typ != 'OK' or not msg_data:
+                    continue
+                
+                header_data = msg_data[0][1]
+                # Убеждаемся, что данные в bytes (безопасная обработка)
+                if isinstance(header_data, str):
+                    # Если это строка, пробуем декодировать как latin-1, затем как UTF-8
+                    try:
+                        header_data = header_data.encode('latin-1')
+                    except:
+                        try:
+                            header_data = header_data.encode('utf-8')
+                        except:
+                            continue
+                elif not isinstance(header_data, bytes):
+                    continue
+                
+                msg_temp = email.message_from_bytes(header_data)
+                
+                # Проверяем совпадение
+                match = False
+                
+                # По Message-ID (точное совпадение)
+                if msgid_clean:
+                    msg_msgid = (msg_temp.get('Message-ID', '') or '').strip().strip('<>')
+                    if msg_msgid == msgid_clean:
+                        match = True
+                
+                # По теме (если нет Message-ID)
+                if not match and subject:
+                    try:
+                        msg_subject_raw = msg_temp.get('Subject', '')
+                        msg_subject = decode_mime_words(msg_subject_raw).lower()
+                        if subject_lower[:50] in msg_subject or msg_subject[:50] in subject_lower:
+                            match = True
+                    except Exception:
+                        # Если ошибка декодирования темы - пропускаем
+                        pass
+                
+                if match:
+                    found_email_id = email_id
+                    break
+            except Exception:
+                # Пропускаем письма с ошибками обработки
                 continue
-            
-            header_data = msg_data[0][1]
-            if isinstance(header_data, str):
-                header_data = header_data.encode('utf-8')
-            msg_temp = email.message_from_bytes(header_data)
-            
-            # Проверяем совпадение
-            match = False
-            
-            # По Message-ID (точное совпадение)
-            if msgid_clean:
-                msg_msgid = (msg_temp.get('Message-ID', '') or '').strip().strip('<>')
-                if msg_msgid == msgid_clean:
-                    match = True
-            
-            # По теме (если нет Message-ID)
-            if not match and subject:
-                msg_subject = decode_mime_words(msg_temp.get('Subject', '')).lower()
-                if subject_lower[:50] in msg_subject or msg_subject[:50] in subject_lower:
-                    match = True
-            
-            if match:
-                found_email_id = email_id
-                break
         
         if not found_email_id:
             mail.logout()
@@ -848,8 +865,16 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
             return (False, info)
         
     except Exception as e:
-        print(f"   ⚠️  Ошибка проверки через IMAP: {e}")
-        info["reason"] = f"imap_exception: {e}"
+        # Безопасная обработка ошибки с кириллицей
+        error_msg = str(e)
+        try:
+            # Пробуем закодировать в UTF-8 для безопасного логирования
+            error_msg_utf8 = error_msg.encode('utf-8', errors='replace').decode('utf-8')
+        except:
+            error_msg_utf8 = "encoding_error"
+        
+        print(f"   ⚠️  Ошибка проверки через IMAP: {error_msg_utf8}")
+        info["reason"] = f"imap_exception: {error_msg_utf8}"
         try:
             mail.logout()
         except:
