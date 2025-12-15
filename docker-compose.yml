@@ -124,6 +124,10 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    ports:
+      # Пробрасываем порты IMAP напрямую для прямого доступа (альтернатива front)
+      - "0.0.0.0:1143:143"
+      - "0.0.0.0:1993:993"
     volumes:
       - "/mailu/mail:/mail"
       - "/mailu/overrides/dovecot:/overrides:ro"
