@@ -7,7 +7,7 @@ import smtplib
 import imaplib
 import time
 import random
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
@@ -29,12 +29,19 @@ from file_generator import create_file_attachment
 ATTACHMENTS_ACTION_LOG = os.getenv("ATTACHMENTS_ACTION_LOG", "send_attachs_actions.jsonl")
 ATTACHMENTS_TEXT_LOG = os.getenv("ATTACHMENTS_TEXT_LOG", "send_attachs.log")
 
+# Московское время (UTC+3)
+MOSCOW_TZ = timezone(timedelta(hours=3))
+
+def now_moscow():
+    """Возвращает текущее время в московском часовом поясе (UTC+3)"""
+    return datetime.now(MOSCOW_TZ)
+
 def append_send_attachs_log_line(output_dir: Path, line: str):
     """Пишет человекочитаемый лог в /app/sent_attachments."""
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
         log_path = output_dir / ATTACHMENTS_TEXT_LOG
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ts = now_moscow().strftime("%Y-%m-%d %H:%M:%S")
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"[{ts}] {line}\n")
     except Exception as e:
@@ -46,7 +53,7 @@ def log_send_attachs_action(output_dir: Path, action: str, meta: dict):
     action: SAVED | SKIPPED_SPAM | SEND_FAILED | ERROR
     """
     record = {
-        "ts": datetime.now().isoformat(),
+        "ts": now_moscow().isoformat(),
         "action": action,
         **(meta or {}),
     }
@@ -455,7 +462,7 @@ def scan_all_containers_for_maildir():
             scan_log_path = output_dir / "container_scan.log"
             with open(scan_log_path, "a", encoding="utf-8") as f:
                 f.write(f"\n{'='*70}\n")
-                f.write(f"[{datetime.now().isoformat()}] СКАНИРОВАНИЕ DOCKER КОНТЕЙНЕРОВ\n")
+                f.write(f"[{now_moscow().isoformat()}] СКАНИРОВАНИЕ DOCKER КОНТЕЙНЕРОВ\n")
                 f.write(f"{'='*70}\n")
                 f.write(f"Найдено контейнеров с maildir: {len(maildir_containers)}\n\n")
                 
@@ -759,7 +766,7 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
         if not message_id:
             try:
                 import datetime
-                date_since = (datetime.datetime.now() - datetime.timedelta(hours=3)).strftime('%d-%b-%Y')
+                date_since = (now_moscow() - timedelta(hours=3)).strftime('%d-%b-%Y')
                 search_criteria.append(f'SINCE {date_since}')
             except:
                 pass
@@ -1451,7 +1458,7 @@ def send_legitimate_email():
         print(f"   Попробуйте запустить контейнер с правами root или исправить права на volume")
     
     # Генерируем timestamp для всех файлов этого письма
-    timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+    timestamp_str = now_moscow().strftime('%Y%m%d_%H%M%S_%f')
     
     # Сохраняем файлы В ПАМЯТИ (не на диск!) до проверки спама
     attachments_data = []  # (file_content, filename, mime_type)
@@ -1502,7 +1509,7 @@ def send_legitimate_email():
         msg.attach(part)
     
     try:
-        print(f"📧 [{datetime.now().strftime('%H:%M:%S')}] Отправка ЛЕГИТИМНОГО письма")
+        print(f"📧 [{now_moscow().strftime('%H:%M:%S')}] Отправка ЛЕГИТИМНОГО письма")
         print(f"   От: {sender_email}")
         print(f"   Кому: {target_email}")
         print(f"   Компания: {company}")
@@ -1910,7 +1917,7 @@ P.P.S. Готовы ответить на любые вопросы по тел�
     pdf_content, filename, mime_type = create_file_attachment("excel", company, is_malicious=True)
     
     # Timestamp для имен файлов
-    timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+    timestamp_str = now_moscow().strftime('%Y%m%d_%H%M%S_%f')
     
     # Сохраняем данные в памяти (НЕ на диск до проверки спама!)
     attachment_data = (pdf_content, filename, mime_type)
@@ -1945,7 +1952,7 @@ P.P.S. Готовы ответить на любые вопросы по тел�
     msg.attach(part)
     
     try:
-        print(f"📧 [{datetime.now().strftime('%H:%M:%S')}] Отправка ВРЕДОНОСНОГО письма")
+        print(f"📧 [{now_moscow().strftime('%H:%M:%S')}] Отправка ВРЕДОНОСНОГО письма")
         print(f"   От: {sender_email}")
         print(f"   Кому: {target_email}")
         print(f"   Компания: {company}")
@@ -2224,7 +2231,7 @@ def mixed_phishing_attack():
     print(f"✅ Легитимных писем: {legitimate_count}")
     print(f"🔴 Вредоносных писем: {malicious_count}")
     print(f"📧 Всего отправлено: {legitimate_count + malicious_count}")
-    print(f"⏰ Время работы: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"⏰ Время работы: {now_moscow().strftime('%Y-%m-%d %H:%M:%S')}")
     print("🛑 Атака остановлена")
 
 if __name__ == "__main__":
