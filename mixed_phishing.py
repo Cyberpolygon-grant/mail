@@ -307,6 +307,14 @@ try:
         spam_enabled = result[0]
         spam_threshold = result[1]
         
+        # Преобразуем spam_threshold в int, если он не None
+        if spam_threshold is not None:
+            try:
+                spam_threshold = int(spam_threshold)
+            except (ValueError, TypeError):
+                print(f'ERROR: Не удалось преобразовать spam_threshold в число: {{spam_threshold}}', file=sys.stderr)
+                sys.exit(1)
+        
         # Возвращаем значения как JSON для надежности
         result_dict = {{
             'spam_enabled': spam_enabled,
@@ -351,10 +359,21 @@ except Exception as e:
                 spam_enabled = data.get('spam_enabled')
                 spam_threshold = data.get('spam_threshold')
                 
+                # Преобразуем spam_threshold в int, если он не None
+                if spam_threshold is not None:
+                    try:
+                        spam_threshold = int(spam_threshold)
+                    except (ValueError, TypeError):
+                        print(f"   ⚠️  Не удалось преобразовать spam_threshold в число: {spam_threshold}")
+                        spam_threshold = None
+                
+                # Отладочный вывод для проверки
+                print(f"   ✅ Получено из БД для {user_email}: spam_enabled={spam_enabled}, spam_threshold={spam_threshold}")
+                
                 # Возвращаем словарь с обоими полями
                 result_dict = {{
                     'spam_enabled': spam_enabled,
-                    'spam_threshold': int(spam_threshold) if spam_threshold is not None else None
+                    'spam_threshold': spam_threshold
                 }}
                 return result_dict
             except (json.JSONDecodeError, ValueError) as e:
@@ -853,7 +872,7 @@ def track_spam_threshold_changes(user_email, output_dir=None):
     
     return info
 
-def get_user_spam_threshold_cached(user_email, cache_duration=300, use_default=True):
+def get_user_spam_threshold_cached(user_email, cache_duration=60, use_default=False):
     """
     Получает настройки спам-фильтра (spam_enabled и spam_threshold) пользователя с кэшированием результатов.
     Кэш обновляется каждые cache_duration секунд (по умолчанию 5 минут).
@@ -887,19 +906,36 @@ def get_user_spam_threshold_cached(user_email, cache_duration=300, use_default=T
     # Получаем значения из базы данных
     spam_settings = get_user_spam_threshold(user_email)
     
-    # Если не удалось получить из БД, используем значение по умолчанию
-    if spam_settings is None and use_default:
-        spam_settings = {
-            'spam_enabled': None,
-            'spam_threshold': DEFAULT_THRESHOLD
-        }
-        print(f"   ℹ️  Используется значение по умолчанию: {DEFAULT_THRESHOLD} (фильтр отключен)")
+    # НЕ используем значение по умолчанию - возвращаем то, что есть в БД
+    # Если не удалось получить из БД, возвращаем None
+    if spam_settings is None:
+        if use_default:
+            print(f"   ⚠️  Не удалось получить настройки из БД для {user_email}")
+            print(f"   💡 Проверьте доступность контейнера admin и базы данных")
+        return None
     
-    # Сохраняем в кэш (даже если это значение по умолчанию)
-    if spam_settings is not None:
-        get_user_spam_threshold_cached._cache[cache_key] = (spam_settings, current_time)
+    # Сохраняем в кэш только реальные значения из БД
+    get_user_spam_threshold_cached._cache[cache_key] = (spam_settings, current_time)
     
     return spam_settings
+
+def clear_spam_threshold_cache(user_email=None):
+    """
+    Очищает кэш настроек спам-фильтра.
+    
+    Args:
+        user_email: Email пользователя для очистки конкретного кэша, или None для очистки всего кэша
+    """
+    if not hasattr(get_user_spam_threshold_cached, '_cache'):
+        return
+    
+    if user_email:
+        if user_email in get_user_spam_threshold_cached._cache:
+            del get_user_spam_threshold_cached._cache[user_email]
+            print(f"   ✅ Кэш для {user_email} очищен")
+    else:
+        get_user_spam_threshold_cached._cache.clear()
+        print(f"   ✅ Весь кэш настроек спам-фильтра очищен")
 
 # Функция проверки спама через заголовки
 def check_email_is_spam(msg):
