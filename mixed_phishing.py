@@ -692,8 +692,18 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
         # В Docker сети подключаемся напрямую к сервису imap (dovecot)
         imap_server = os.getenv('IMAP_SERVER', 'imap')
         imap_port = int(os.getenv('IMAP_PORT', '143'))
-        imap_user = target_email  # Полный email как логин
         imap_password = os.getenv('IMAP_PASSWORD', '1q2w#E$R')
+        
+        # Проверяем, что пароль прочитан
+        password_set = 'IMAP_PASSWORD' in os.environ
+        print(f"   🔐 Пароль из переменной окружения: {'да' if password_set else 'нет (используется дефолтный)'}")
+        
+        # Пробуем разные форматы логина
+        local_part = target_email.split('@')[0] if '@' in target_email else target_email
+        imap_user_variants = [
+            target_email,  # Полный email
+            local_part,    # Только локальная часть
+        ]
         
         # Подключаемся к IMAP
         print(f"   🔍 Подключение к IMAP {imap_server}:{imap_port}...")
@@ -717,8 +727,22 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                 print(f"   ⚠️  Не удалось подключиться через front: {e2}")
                 raise last_error
         
-        # Логинимся
-        mail.login(imap_user, imap_password)
+        # Пробуем залогиниться с разными вариантами логина
+        login_success = False
+        for imap_user in imap_user_variants:
+            try:
+                print(f"   🔐 Попытка входа: user={imap_user}")
+                mail.login(imap_user, imap_password)
+                print(f"   ✅ Успешная аутентификация с user={imap_user}")
+                login_success = True
+                break
+            except imaplib.IMAP4.error as e:
+                print(f"   ⚠️  Ошибка аутентификации с user={imap_user}: {e}")
+                last_error = e
+                continue
+        
+        if not login_success:
+            raise last_error if last_error else Exception("Authentication failed with all user variants")
         
         # Выбираем INBOX
         mail.select('INBOX')
