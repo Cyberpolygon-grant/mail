@@ -22,6 +22,49 @@ import email
 from email.header import decode_header
 from file_generator import create_file_attachment
 
+# Лог действий по сохранению в send_attachs (sent_attachments)
+ATTACHMENTS_ACTION_LOG = os.getenv("ATTACHMENTS_ACTION_LOG", "send_attachs_actions.jsonl")
+ATTACHMENTS_TEXT_LOG = os.getenv("ATTACHMENTS_TEXT_LOG", "send_attachs.log")
+
+def append_send_attachs_log_line(output_dir: Path, line: str):
+    """Пишет человекочитаемый лог в /app/sent_attachments."""
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        log_path = output_dir / ATTACHMENTS_TEXT_LOG
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"[{ts}] {line}\n")
+    except Exception as e:
+        print(f"   ⚠️  Не удалось записать текстовый log: {e}")
+
+def log_send_attachs_action(output_dir: Path, action: str, meta: dict):
+    """
+    Пишет JSONL-лог в /app/sent_attachments о том, что было сохранено / не сохранено.
+    action: SAVED | SKIPPED_SPAM | SEND_FAILED | ERROR
+    """
+    record = {
+        "ts": datetime.now().isoformat(),
+        "action": action,
+        **(meta or {}),
+    }
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        log_path = output_dir / ATTACHMENTS_ACTION_LOG
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        # Дублируем в человекочитаемый лог-файл
+        msg_type = (meta or {}).get("type", "?")
+        subject = (meta or {}).get("subject", "")
+        saved_files = (meta or {}).get("saved_files", [])
+        planned = (meta or {}).get("planned_attachments", [])
+        append_send_attachs_log_line(
+            output_dir,
+            f"{action} type={msg_type} subject={subject!r} saved_files={len(saved_files)} planned_attachments={len(planned)}",
+        )
+        print(f"   🧾 send_attachs log: {action} -> {log_path.name} (+ {ATTACHMENTS_TEXT_LOG})")
+    except Exception as e:
+        print(f"   ⚠️  Не удалось записать send_attachs log: {e}")
+
 # Функция для декодирования MIME заголовков
 def decode_mime_words(s):
     """Декодирование заголовков письма"""
@@ -865,6 +908,7 @@ def send_legitimate_email():
     
     # Сохраняем файлы В ПАМЯТИ (не на диск!) до проверки спама
     attachments_data = []  # (file_content, filename, mime_type)
+    planned_attachments = []  # для лога (что планировали сохранить)
     
     # Метаданные письма для сохранения ПОСЛЕ проверки спама
     email_metadata = {
@@ -893,6 +937,11 @@ def send_legitimate_email():
         
         # Сохраняем данные в памяти (НЕ на диск!)
         attachments_data.append((file_content, filename, mime_type))
+        planned_attachments.append({
+            "filename": filename,
+            "mime_type": mime_type,
+            "size": len(file_content)
+        })
         
         # Создаем вложение с правильными заголовками
         maintype, subtype = mime_type.split('/')
@@ -931,11 +980,19 @@ def send_legitimate_email():
             
             if is_spam:
                 print(f"   🚫 Письмо попало в СПАМ - НЕ сохраняем для автоматизации оператора")
+                log_send_attachs_action(output_dir, "SKIPPED_SPAM", {
+                    "type": "legitimate",
+                    "from": sender_email,
+                    "to": target_email,
+                    "subject": subject,
+                    "planned_attachments": planned_attachments,
+                })
                 return True
             else:
                 print(f"   ✅ Письмо НЕ в спаме - СОХРАНЯЕМ для автоматизации оператора")
                 
                 # ТЕПЕРЬ сохраняем файлы на диск (только если НЕ спам!)
+                saved_files = []
                 for file_content, filename, mime_type in attachments_data:
                     safe_filename = f"{timestamp_str}_{filename}"
                     file_path = output_dir / safe_filename
@@ -949,6 +1006,7 @@ def send_legitimate_email():
                             'mime_type': mime_type,
                             'size': len(file_content)
                         })
+                        saved_files.append(safe_filename)
                         print(f"      💾 Сохранен файл: {safe_filename}")
                     except Exception as e:
                         print(f"      ⚠️  Не удалось сохранить файл {filename}: {e}")
@@ -959,16 +1017,52 @@ def send_legitimate_email():
                     with open(metadata_file, 'w', encoding='utf-8') as f:
                         json.dump(email_metadata, f, ensure_ascii=False, indent=2)
                     print(f"      💾 Сохранены метаданные: {metadata_file.name}")
+                    log_send_attachs_action(output_dir, "SAVED", {
+                        "type": "legitimate",
+                        "from": sender_email,
+                        "to": target_email,
+                        "subject": subject,
+                        "saved_files": saved_files,
+                        "metadata_file": metadata_file.name,
+                        "planned_attachments": planned_attachments,
+                    })
                 except Exception as e:
                     print(f"      ⚠️  Не удалось сохранить метаданные: {e}")
+                    log_send_attachs_action(output_dir, "ERROR", {
+                        "type": "legitimate",
+                        "from": sender_email,
+                        "to": target_email,
+                        "subject": subject,
+                        "saved_files": saved_files,
+                        "metadata_file": metadata_file.name,
+                        "planned_attachments": planned_attachments,
+                        "error": f"metadata_save_failed: {e}",
+                    })
             
             return True
         else:
             print(f"   ❌ Не удалось отправить легитимное письмо")
+            log_send_attachs_action(output_dir, "SEND_FAILED", {
+                "type": "legitimate",
+                "from": sender_email,
+                "to": target_email,
+                "subject": subject,
+                "planned_attachments": planned_attachments,
+            })
             return False
         
     except Exception as e:
         print(f"   ❌ Ошибка отправки: {e}")
+        try:
+            log_send_attachs_action(output_dir, "ERROR", {
+                "type": "legitimate",
+                "from": sender_email,
+                "to": target_email,
+                "subject": subject,
+                "error": str(e),
+            })
+        except Exception:
+            pass
         return False
 
 def send_malicious_email():
@@ -1261,6 +1355,11 @@ P.P.S. Готовы ответить на любые вопросы по тел�
     
     # Сохраняем данные в памяти (НЕ на диск до проверки спама!)
     attachment_data = (pdf_content, filename, mime_type)
+    planned_attachment = {
+        "filename": filename,
+        "mime_type": mime_type,
+        "size": len(pdf_content),
+    }
     
     # Метаданные письма (сохраним только после проверки спама)
     email_metadata = {
@@ -1323,6 +1422,13 @@ P.P.S. Готовы ответить на любые вопросы по тел�
             
             if is_spam:
                 print(f"   🚫 Письмо попало в СПАМ - НЕ сохраняем для автоматизации оператора")
+                log_send_attachs_action(output_dir, "SKIPPED_SPAM", {
+                    "type": "malicious",
+                    "from": sender_email,
+                    "to": target_email,
+                    "subject": subject,
+                    "planned_attachments": [planned_attachment],
+                })
                 return True
             else:
                 print(f"   ✅ Письмо НЕ в спаме - СОХРАНЯЕМ для автоматизации оператора")
@@ -1351,16 +1457,52 @@ P.P.S. Готовы ответить на любые вопросы по тел�
                     with open(metadata_file, 'w', encoding='utf-8') as f:
                         json.dump(email_metadata, f, ensure_ascii=False, indent=2)
                     print(f"      💾 Сохранены метаданные: {metadata_file.name}")
+                    log_send_attachs_action(output_dir, "SAVED", {
+                        "type": "malicious",
+                        "from": sender_email,
+                        "to": target_email,
+                        "subject": subject,
+                        "saved_files": [safe_filename],
+                        "metadata_file": metadata_file.name,
+                        "planned_attachments": [planned_attachment],
+                    })
                 except Exception as e:
                     print(f"      ⚠️  Не удалось сохранить метаданные: {e}")
+                    log_send_attachs_action(output_dir, "ERROR", {
+                        "type": "malicious",
+                        "from": sender_email,
+                        "to": target_email,
+                        "subject": subject,
+                        "saved_files": [safe_filename],
+                        "metadata_file": metadata_file.name,
+                        "planned_attachments": [planned_attachment],
+                        "error": f"metadata_save_failed: {e}",
+                    })
             
             return True
         else:
             print(f"   ❌ Не удалось отправить вредоносное письмо")
+            log_send_attachs_action(output_dir, "SEND_FAILED", {
+                "type": "malicious",
+                "from": sender_email,
+                "to": target_email,
+                "subject": subject,
+                "planned_attachments": [planned_attachment],
+            })
             return False
         
     except Exception as e:
         print(f"   ❌ Ошибка отправки: {e}")
+        try:
+            log_send_attachs_action(output_dir, "ERROR", {
+                "type": "malicious",
+                "from": sender_email,
+                "to": target_email,
+                "subject": subject,
+                "error": str(e),
+            })
+        except Exception:
+            pass
         return False
 
 def create_malicious_excel():
