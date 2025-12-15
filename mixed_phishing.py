@@ -695,33 +695,70 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
     time.sleep(wait_time)
     
     mail = None
+    max_retries = 3
+    retry_delay = 2
+    
+    # Попытки подключения с retry
+    for attempt in range(max_retries):
+        try:
+            # Подключение к IMAP (как в test.py)
+            if attempt > 0:
+                print(f"   🔄 Повторная попытка подключения к IMAP ({attempt + 1}/{max_retries})...")
+                time.sleep(retry_delay)
+            else:
+                print(f"   🔍 Подключение к IMAP для проверки заголовков...")
+            
+            mail = imaplib.IMAP4('localhost', 1143)  # Прямой доступ к dovecot
+            mail.login('operator1@financepro.ru', '1q2w#E$R')
+            print(f"   ✅ Подключение к IMAP успешно!")
+            break  # Успешное подключение, выходим из цикла retry
+            
+        except (ConnectionRefusedError, OSError) as e:
+            error_msg = str(e)
+            if attempt < max_retries - 1:
+                print(f"   ⚠️  Ошибка подключения к IMAP (попытка {attempt + 1}/{max_retries}): {error_msg}")
+                continue
+            else:
+                print(f"   ❌ Не удалось подключиться к IMAP после {max_retries} попыток: {error_msg}")
+                print(f"   ⚠️  Продолжаем без проверки заголовков (fail-open)")
+                info["reason"] = f"imap_connection_failed: {error_msg}"
+                # При ошибке подключения сохраняем (fail-open)
+                return (False, info)
+        except Exception as e:
+            error_msg = str(e)
+            print(f"   ❌ Неожиданная ошибка подключения к IMAP: {error_msg}")
+            print(f"   ⚠️  Продолжаем без проверки заголовков (fail-open)")
+            info["reason"] = f"imap_exception: {error_msg}"
+            # При неожиданной ошибке сохраняем (fail-open)
+            return (False, info)
+    
+    if mail is None:
+        # Не удалось подключиться после всех попыток
+        print(f"   ⚠️  Продолжаем без проверки заголовков (fail-open)")
+        info["reason"] = "imap_connection_failed_after_retries"
+        return (False, info)  # При ошибке сохраняем (fail-open)
+    
     try:
-        # Подключение к IMAP (как в test.py)
-        print(f"   🔍 Подключение к IMAP для проверки заголовков...")
-        mail = imaplib.IMAP4('localhost', 1143)  # Прямой доступ к dovecot
-        mail.login('operator1@financepro.ru', '1q2w#E$R')
-        print(f"   ✅ Подключение к IMAP успешно!")
-        
         # Выбираем INBOX
         status, _ = mail.select('INBOX')
         if status != 'OK':
             print(f"   ⚠️  Ошибка выбора INBOX")
             info["reason"] = "imap_select_failed"
-            return (False, info)
+            return (False, info)  # При ошибке сохраняем (fail-open)
         
         # Ищем письма
         status, messages = mail.search(None, 'ALL')
         if status != 'OK':
             print(f"   ⚠️  Ошибка поиска писем")
             info["reason"] = "imap_search_failed"
-            return (False, info)
+            return (False, info)  # При ошибке сохраняем (fail-open)
         
         # Получаем список ID писем
         email_ids = messages[0].split()
         if not email_ids:
             print(f"   ⚠️  Нет писем в INBOX")
             info["reason"] = "no_emails_in_inbox"
-            return (False, info)
+            return (False, info)  # При отсутствии писем сохраняем (fail-open)
         
         # Берем последние письма (до 5 самых новых)
         subject_lower = (subject or "").lower()
@@ -784,9 +821,10 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                 print(f"   ⚠️  Ошибка обработки письма: {e}")
                 continue
         
-        # Если не нашли - fail-open (сохраняем)
+        # Если не нашли письмо - сохраняем (fail-open)
+        print(f"   ⚠️  Письмо не найдено в INBOX, сохраняем (fail-open)")
         info["reason"] = "email_not_found_in_imap"
-        return (False, info)
+        return (False, info)  # При отсутствии письма сохраняем (fail-open)
         
     except Exception as e:
         error_msg = str(e)
@@ -796,8 +834,9 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
             error_msg_utf8 = "encoding_error"
         
         print(f"   ⚠️  Ошибка проверки через IMAP: {error_msg_utf8}")
+        print(f"   ⚠️  Продолжаем без проверки заголовков (fail-open)")
         info["reason"] = f"imap_exception: {error_msg_utf8}"
-        # fail-open (сохраняем)
+        # При ошибке сохраняем (fail-open)
         return (False, info)
     finally:
         # Закрываем соединение
