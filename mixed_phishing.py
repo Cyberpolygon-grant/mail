@@ -675,8 +675,9 @@ def check_email_spam_in_container(container_name, maildir_path, target_email, su
 
 def check_email_spam_after_send(target_email, subject, message_id=None, wait_seconds=8):
     """
-    Проверка спама по заголовкам письма через IMAP: X-Spam, X-Spam-Level, X-Spamd-Bar
+    Проверка спама по заголовкам письма через прямое чтение из maildir: X-Spam, X-Spam-Level, X-Spamd-Bar
     Если X-Spam: Yes → СПАМ (не сохраняем)
+    Просто берем последнее письмо из INBOX без сложного поиска
     """
     info = {
         "message_id": message_id,
@@ -688,266 +689,164 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
         "x_spamd_bar": None,
     }
     
-    # Ждем обработки rspamd и готовности IMAP сервера
-    # Увеличиваем время ожидания, чтобы письмо успело попасть в INBOX
+    # Ждем обработки rspamd
     wait_time = max(wait_seconds, 15)  # Минимум 15 секунд
-    print(f"   ⏳ Ожидание {wait_time} сек для обработки rspamd и готовности IMAP...")
+    print(f"   ⏳ Ожидание {wait_time} сек для обработки rspamd...")
     time.sleep(wait_time)
     
     try:
-        # Параметры IMAP
-        # В Docker сети подключаемся напрямую к сервису imap (dovecot)
-        imap_server = os.getenv('IMAP_SERVER', 'imap')
-        imap_port = int(os.getenv('IMAP_PORT', '143'))
-        imap_password = os.getenv('IMAP_PASSWORD', '1q2w#E$R')
-        
-        # Проверяем, что пароль прочитан
-        password_set = 'IMAP_PASSWORD' in os.environ
-        print(f"   🔐 Пароль из переменной окружения: {'да' if password_set else 'нет (используется дефолтный)'}")
-        
-        # Пробуем разные форматы логина
+        # В контейнере phishing-demo maildir монтируется как /mailu/mail:/mailu/mail:ro
+        # Структура Mailu: /mailu/mail/<domain>/<user>/
+        mail_dir = os.getenv('MAIL_DIR', '/mailu/mail')
+        mail_domain = os.getenv('MAIL_DOMAIN', 'financepro.ru')
         local_part = target_email.split('@')[0] if '@' in target_email else target_email
-        imap_user_variants = [
-            target_email,  # Полный email
-            local_part,    # Только локальная часть
-        ]
         
-        # Подключаемся к IMAP
-        print(f"   🔍 Подключение к IMAP {imap_server}:{imap_port}...")
-        mail = None
-        last_error = None
+        # Основной путь к maildir пользователя в Mailu
+        # Формат: /mailu/mail/<domain>/<user>/
+        user_maildir = Path(mail_dir) / mail_domain / local_part
         
-        # Пробуем подключиться к imap (dovecot) напрямую
+        print(f"   🔍 Проверяю maildir: {user_maildir}")
+        
+        if not user_maildir.exists():
+            print(f"   ⚠️  Maildir не найден: {user_maildir}")
+            # Пробуем альтернативные пути
+            alt_paths = [
+                Path(mail_dir) / local_part,
+                Path('/mailu/mail') / mail_domain / local_part,
+                Path('/mailu/mail') / local_part,
+            ]
+            for alt_path in alt_paths:
+                if alt_path.exists() and alt_path.is_dir():
+                    print(f"   ✅ Найден альтернативный путь: {alt_path}")
+                    user_maildir = alt_path
+                    break
+            else:
+                info["reason"] = "user_maildir_not_found"
+                return (False, info)
+        
+        print(f"   ✅ Maildir найден: {user_maildir}")
+        
+        # Показываем структуру maildir для отладки
         try:
-            mail = imaplib.IMAP4(imap_server, imap_port)
-            print(f"   ✅ Подключено к {imap_server}:{imap_port}")
+            items = list(user_maildir.iterdir())
+            print(f"   📁 Содержимое maildir ({len(items)} элементов):")
+            for item in items[:10]:
+                item_type = "DIR" if item.is_dir() else "FILE"
+                print(f"      {item_type}: {item.name}")
         except Exception as e:
-            last_error = e
-            print(f"   ⚠️  Не удалось подключиться к {imap_server}:{imap_port}: {e}")
-            # Пробуем через front (nginx proxy)
-            try:
-                print(f"   🔄 Пробую через front:143...")
-                mail = imaplib.IMAP4('front', 143)
-                print(f"   ✅ Подключено через front:143")
-            except Exception as e2:
-                last_error = e2
-                print(f"   ⚠️  Не удалось подключиться через front: {e2}")
-                raise last_error
+            print(f"   ⚠️  Не удалось прочитать содержимое: {e}")
         
-        # Пробуем залогиниться с разными вариантами логина
-        login_success = False
-        for imap_user in imap_user_variants:
+        # В Mailu структура maildir: внутри maildir пользователя есть папки new/ и cur/ для INBOX
+        # Берем последние письма из INBOX (new и cur)
+        inbox_dirs = []
+        for subdir in ['new', 'cur']:
+            inbox_path = user_maildir / subdir
+            if inbox_path.exists():
+                inbox_dirs.append(inbox_path)
+                try:
+                    file_count = len([f for f in inbox_path.iterdir() if f.is_file()])
+                    print(f"   ✅ Найдена папка INBOX/{subdir}: {inbox_path} ({file_count} файлов)")
+                except:
+                    print(f"   ✅ Найдена папка INBOX/{subdir}: {inbox_path}")
+        
+        if not inbox_dirs:
+            print(f"   ⚠️  Папки new/ и cur не найдены в {user_maildir}")
+            info["reason"] = "inbox_not_found"
+            return (False, info)
+        
+        # Собираем все недавние файлы из INBOX
+        current_time = time.time()
+        recent_files = []
+        
+        for inbox_dir in inbox_dirs:
             try:
-                print(f"   🔐 Попытка входа: user={imap_user}")
-                mail.login(imap_user, imap_password)
-                print(f"   ✅ Успешная аутентификация с user={imap_user}")
-                login_success = True
-                break
-            except imaplib.IMAP4.error as e:
-                print(f"   ⚠️  Ошибка аутентификации с user={imap_user}: {e}")
-                last_error = e
+                for email_file in inbox_dir.iterdir():
+                    if not email_file.is_file():
+                        continue
+                    try:
+                        file_mtime = email_file.stat().st_mtime
+                        # Берем файлы за последние 30 минут
+                        if current_time - file_mtime < 1800:
+                            recent_files.append((email_file, file_mtime))
+                    except:
+                        continue
+            except:
                 continue
         
-        if not login_success:
-            raise last_error if last_error else Exception("Authentication failed with all user variants")
-        
-        # Выбираем INBOX
-        mail.select('INBOX')
-        
-        # Ищем письмо по Message-ID (приоритет) или по дате
-        search_criteria = []
-        
-        # Message-ID - самый надежный способ поиска (всегда ASCII)
-        if message_id:
-            msgid_clean = message_id.strip().strip('<>')
-            search_criteria.append(f'HEADER Message-ID "{msgid_clean}"')
-        
-        # Если нет Message-ID, ищем недавние письма (за последние 3 часа)
-        if not message_id:
-            try:
-                import datetime
-                date_since = (now_moscow() - timedelta(hours=3)).strftime('%d-%b-%Y')
-                search_criteria.append(f'SINCE {date_since}')
-            except:
-                pass
-        
-        if not search_criteria:
-            mail.logout()
-            info["reason"] = "no_search_criteria"
+        if not recent_files:
+            info["reason"] = "no_recent_emails"
             return (False, info)
         
-        # Ищем письмо (запрос всегда в ASCII, безопасно)
-        search_query = ' '.join(search_criteria) if len(search_criteria) == 1 else ' OR '.join(search_criteria)
-        print(f"   🔍 Поиск письма: {search_query}")
-        typ, data = mail.search(None, search_query)
+        # Сортируем по времени (самые новые первыми)
+        recent_files.sort(key=lambda x: x[1], reverse=True)
         
-        if typ != 'OK' or not data[0]:
-            print(f"   ⚠️  Поиск не вернул результатов (typ={typ})")
-            mail.logout()
-            info["reason"] = "email_not_found_in_imap"
-            return (False, info)
-        
-        # Получаем ID писем
-        email_ids = data[0].split()
-        if not email_ids:
-            print(f"   ⚠️  Не найдено писем по запросу")
-            mail.logout()
-            info["reason"] = "email_not_found_in_imap"
-            return (False, info)
-        
-        print(f"   📧 Найдено писем для проверки: {len(email_ids)}")
-        
-        # Если искали по Message-ID - берем первое найденное
-        # Если искали по дате - нужно проверить каждое письмо по теме
-        found_email_id = None
+        # Проверяем последние письма (до 5 самых новых)
         subject_lower = (subject or "").lower()
         msgid_clean = message_id.strip().strip('<>') if message_id else None
         
-        for email_id in email_ids:
+        for email_file, _ in recent_files[:5]:
             try:
-                # Получаем заголовки для проверки
-                typ, msg_data = mail.fetch(email_id, '(RFC822.HEADER)')
-                if typ != 'OK' or not msg_data:
-                    continue
+                with open(email_file, 'rb') as f:
+                    msg = email.message_from_bytes(f.read())
                 
-                header_data = msg_data[0][1]
-                # Убеждаемся, что данные в bytes (безопасная обработка)
-                if isinstance(header_data, str):
-                    # Если это строка, пробуем декодировать как latin-1, затем как UTF-8
-                    try:
-                        header_data = header_data.encode('latin-1')
-                    except:
-                        try:
-                            header_data = header_data.encode('utf-8')
-                        except:
-                            continue
-                elif not isinstance(header_data, bytes):
-                    continue
-                
-                msg_temp = email.message_from_bytes(header_data)
-                
-                # Проверяем совпадение
+                # Проверяем совпадение по Message-ID или теме
                 match = False
                 
-                # По Message-ID (точное совпадение)
                 if msgid_clean:
-                    msg_msgid = (msg_temp.get('Message-ID', '') or '').strip().strip('<>')
+                    msg_msgid = (msg.get('Message-ID', '') or '').strip().strip('<>')
                     if msg_msgid == msgid_clean:
                         match = True
                 
-                # По теме (если нет Message-ID)
                 if not match and subject:
                     try:
-                        msg_subject_raw = msg_temp.get('Subject', '')
-                        msg_subject = decode_mime_words(msg_subject_raw).lower()
+                        msg_subject = decode_mime_words(msg.get('Subject', '')).lower()
                         if subject_lower[:50] in msg_subject or msg_subject[:50] in subject_lower:
                             match = True
-                    except Exception:
-                        # Если ошибка декодирования темы - пропускаем
+                    except:
                         pass
                 
-                if match:
-                    found_email_id = email_id
-                    print(f"   ✅ Письмо найдено по совпадению (Message-ID или тема)")
-                    break
-            except Exception:
-                # Пропускаем письма с ошибками обработки
+                # Если нашли совпадение ИЛИ это самое последнее письмо - проверяем заголовки
+                if match or (email_file == recent_files[0][0]):
+                    x_spam = msg.get('X-Spam', '').strip()
+                    x_spam_level = msg.get('X-Spam-Level', '').strip()
+                    x_spamd_bar = msg.get('X-Spamd-Bar', '').strip()
+                    
+                    info["x_spam_header"] = x_spam
+                    info["x_spam_level"] = x_spam_level
+                    info["x_spamd_bar"] = x_spamd_bar
+                    info["found_path"] = str(email_file)
+                    info["found_in"] = "maildir_inbox"
+                    
+                    print(f"   ✅ Письмо найдено в maildir")
+                    print(f"      X-Spam: '{x_spam}'")
+                    print(f"      X-Spam-Level: '{x_spam_level}'")
+                    print(f"      X-Spamd-Bar: '{x_spamd_bar}'")
+                    
+                    # ПРОВЕРКА: если X-Spam: Yes → СПАМ
+                    if x_spam and x_spam.strip().upper() == 'YES':
+                        print(f"   🚫 РЕШЕНИЕ: X-Spam: Yes → НЕ СОХРАНЯЕМ (СПАМ)")
+                        info["reason"] = "x_spam_yes"
+                        return (True, info)
+                    else:
+                        print(f"   ✅ РЕШЕНИЕ: X-Spam != Yes → СОХРАНЯЕМ (НЕ СПАМ)")
+                        info["reason"] = "x_spam_no_or_missing"
+                        return (False, info)
+            except Exception as e:
                 continue
         
-        if not found_email_id:
-            # Если не нашли по точному совпадению, пробуем взять самое последнее письмо
-            # (возможно письмо только что пришло и еще обрабатывается)
-            if email_ids:
-                print(f"   ⚠️  Точное совпадение не найдено, проверяю последнее письмо из {len(email_ids)} найденных...")
-                email_id = email_ids[-1]  # Берем самое последнее (новое)
-                typ, msg_data = mail.fetch(email_id, '(RFC822.HEADER)')
-                if typ == 'OK' and msg_data:
-                    header_data = msg_data[0][1]
-                    if isinstance(header_data, str):
-                        try:
-                            header_data = header_data.encode('latin-1')
-                        except:
-                            try:
-                                header_data = header_data.encode('utf-8')
-                            except:
-                                header_data = None
-                    if header_data:
-                        try:
-                            msg_temp = email.message_from_bytes(header_data)
-                            # Проверяем хотя бы по части Message-ID или времени
-                            if message_id:
-                                msg_msgid = (msg_temp.get('Message-ID', '') or '').strip().strip('<>')
-                                msgid_part = message_id.strip().strip('<>').split('@')[0] if '@' in message_id else ''
-                                if msgid_part and msgid_part in msg_msgid:
-                                    found_email_id = email_id
-                                    print(f"   ✅ Найдено по части Message-ID")
-                        except:
-                            pass
-            
-            if not found_email_id:
-                mail.logout()
-                info["reason"] = "email_not_found_in_imap"
-                return (False, info)
-        
-        email_id = found_email_id
-        
-        # Получаем заголовки письма
-        typ, msg_data = mail.fetch(email_id, '(RFC822.HEADER)')
-        
-        if typ != 'OK' or not msg_data:
-            mail.logout()
-            info["reason"] = "failed_to_fetch_headers"
-            return (False, info)
-        
-        # Парсим заголовки
-        header_data = msg_data[0][1]
-        # Убеждаемся, что данные в bytes
-        if isinstance(header_data, str):
-            header_data = header_data.encode('utf-8')
-        msg = email.message_from_bytes(header_data)
-        
-        # Проверяем заголовки спама
-        x_spam = msg.get('X-Spam', '').strip()
-        x_spam_level = msg.get('X-Spam-Level', '').strip()
-        x_spamd_bar = msg.get('X-Spamd-Bar', '').strip()
-        
-        info["x_spam_header"] = x_spam
-        info["x_spam_level"] = x_spam_level
-        info["x_spamd_bar"] = x_spamd_bar
-        info["found_in"] = "imap_inbox"
-        
-        print(f"   ✅ Письмо найдено через IMAP")
-        print(f"      X-Spam: '{x_spam}'")
-        print(f"      X-Spam-Level: '{x_spam_level}'")
-        print(f"      X-Spamd-Bar: '{x_spamd_bar}'")
-        
-        mail.logout()
-        
-        # ПРОВЕРКА: если X-Spam: Yes → СПАМ
-        if x_spam and x_spam.strip().upper() == 'YES':
-            print(f"   🚫 РЕШЕНИЕ: X-Spam: Yes → НЕ СОХРАНЯЕМ (СПАМ)")
-            info["reason"] = "x_spam_yes"
-            return (True, info)
-        else:
-            print(f"   ✅ РЕШЕНИЕ: X-Spam != Yes → СОХРАНЯЕМ (НЕ СПАМ)")
-            info["reason"] = "x_spam_no_or_missing"
-            return (False, info)
+        # Если не нашли - fail-open (сохраняем)
+        info["reason"] = "email_not_found_in_maildir"
+        return (False, info)
         
     except Exception as e:
-        # Безопасная обработка ошибки с кириллицей
         error_msg = str(e)
         try:
-            # Пробуем закодировать в UTF-8 для безопасного логирования
             error_msg_utf8 = error_msg.encode('utf-8', errors='replace').decode('utf-8')
         except:
             error_msg_utf8 = "encoding_error"
         
-        print(f"   ⚠️  Ошибка проверки через IMAP: {error_msg_utf8}")
-        info["reason"] = f"imap_exception: {error_msg_utf8}"
-        try:
-            mail.logout()
-        except:
-            pass
+        print(f"   ⚠️  Ошибка проверки через maildir: {error_msg_utf8}")
+        info["reason"] = f"maildir_exception: {error_msg_utf8}"
         # fail-open (сохраняем)
         return (False, info)
 
