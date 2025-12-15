@@ -18,19 +18,50 @@ import zipfile
 import socket
 import json
 from pathlib import Path
-import imaplib
 import email
+from email.header import decode_header
 from file_generator import create_file_attachment
 
-# Импортируем модуль проверки спама
-try:
-    from operator_automatization.spam_checker import check_email_is_spam, decode_mime_words
-except ImportError:
-    # Если модуль не найден, создаем простые заглушки
-    def check_email_is_spam(msg, imap=None, message_id=None):
+# Функция для декодирования MIME заголовков
+def decode_mime_words(s):
+    """Декодирование заголовков письма"""
+    if s is None:
+        return ""
+    decoded_fragments = decode_header(s)
+    decoded_parts = []
+    for fragment, encoding in decoded_fragments:
+        if isinstance(fragment, bytes):
+            decoded_parts.append(fragment.decode(encoding or 'utf-8', errors='ignore'))
+        else:
+            decoded_parts.append(fragment)
+    return ''.join(decoded_parts)
+
+# Функция проверки спама через заголовки
+def check_email_is_spam(msg):
+    """Проверка спама через заголовки письма"""
+    try:
+        spam_flag = msg.get('X-Spam-Flag', '').lower()
+        spam_status = msg.get('X-Spam-Status', '').lower()
+        spam_score = msg.get('X-Spam-Score', '')
+        
+        if spam_flag == 'yes' or 'yes' in spam_status:
+            return True
+        
+        try:
+            if spam_score:
+                score_match = spam_score.split('/')[0].strip()
+                score = float(score_match)
+                if score > 5.0:
+                    return True
+        except:
+            pass
+        
+        if 'spam' in spam_status and 'no' not in spam_status:
+            return True
+        
         return False
-    def decode_mime_words(s):
-        return s if s else ""
+    except:
+        return False
 
 # Бренды и домены для реалистичных отправителей и их подделок
 BRANDS = [
@@ -184,102 +215,151 @@ LEGIT_LOCALPARTS = [
 
 def check_email_spam_after_send(target_email, subject, wait_seconds=5):
     """
-    Проверяет, попало ли отправленное письмо в спам через IMAP
+    Проверяет, попало ли отправленное письмо в спам через файловую систему Mailu
     Возвращает True если письмо в спаме, False если нет
     """
     try:
-        # Настройки IMAP
-        imap_host = os.getenv('IMAP_HOST', 'imap')
-        imap_port = int(os.getenv('IMAP_PORT', '143'))
-        imap_user = target_email
-        imap_password = os.getenv('IMAP_PASSWORD', '')
+        # Настройки maildir
+        mail_dir = os.getenv('MAIL_DIR', '/mailu/mail')
+        mail_domain = os.getenv('MAIL_DOMAIN', 'financepro.ru')
         
-        if not imap_password:
-            # Если пароль не указан, не проверяем спам (считаем что не спам)
-            print(f"   ⚠️  Пароль IMAP не указан, считаем что письмо не в спаме")
+        # Извлекаем локальную часть email (до @)
+        local_part = target_email.split('@')[0] if '@' in target_email else target_email
+        
+        # Путь к maildir пользователя
+        user_maildir = Path(mail_dir) / mail_domain / local_part
+        
+        # Проверяем существование директории
+        if not user_maildir.exists():
+            print(f"   ⚠️  Maildir не найден: {user_maildir}, считаем что письмо не в спаме")
             return False
         
-        # Ждем немного, чтобы письмо обработалось rspamd
+        # Ждем немного, чтобы письмо обработалось rspamd и попало в maildir
+        print(f"   ⏳ Ожидание {wait_seconds} сек для обработки письма...")
         time.sleep(wait_seconds)
         
-        # Подключаемся к IMAP
-        imap = imaplib.IMAP4(imap_host, imap_port)
-        imap.starttls()
-        imap.login(imap_user, imap_password)
+        # Путь к папке Spam
+        spam_dirs = [
+            user_maildir / '.Spam' / 'cur',
+            user_maildir / '.Spam' / 'new',
+            user_maildir / '.Junk' / 'cur',
+            user_maildir / '.Junk' / 'new',
+        ]
         
-        # Проверяем папку Spam сначала
-        try:
-            status, folders = imap.list()
-            spam_folders = [f.decode().split('"')[-2] for f in folders 
-                          if 'Spam' in f.decode() or 'Junk' in f.decode()]
+        # Путь к INBOX для проверки заголовков
+        inbox_dirs = [
+            user_maildir / 'cur',
+            user_maildir / 'new',
+        ]
+        
+        # Ищем письмо по теме в папке Spam
+        print(f"   🔍 Проверяю папку Spam в maildir...")
+        subject_part = subject[:50].lower()  # Первые 50 символов темы
+        
+        for spam_dir in spam_dirs:
+            if not spam_dir.exists():
+                continue
             
-            # Ищем письмо в папке Spam по теме (ищем недавние письма)
-            for spam_folder in spam_folders:
-                try:
-                    imap.select(spam_folder)
-                    # Ищем недавние письма (за последние 2 минуты)
-                    # Используем поиск по теме, но более гибкий
-                    search_subject = subject[:30].replace('"', '\\"')  # Экранируем кавычки
-                    status, messages = imap.search(None, f'(SUBJECT "{search_subject}")')
-                    if status == 'OK' and messages[0]:
-                        email_ids = messages[0].split()
-                        # Проверяем последние письма
-                        for email_id in email_ids[-3:]:  # Проверяем последние 3 письма
-                            try:
-                                status, msg_data = imap.fetch(email_id, '(RFC822)')
-                                if status == 'OK':
-                                    msg = email.message_from_bytes(msg_data[0][1])
-                                    msg_subject = decode_mime_words(msg.get('Subject', ''))
-                                    # Проверяем, что это наше письмо
-                                    if subject[:30] in msg_subject[:50] or msg_subject[:30] in subject[:50]:
-                                        imap.close()
-                                        imap.logout()
-                                        return True
-                            except:
-                                continue
-                except Exception as e:
-                    print(f"      ⚠️  Ошибка проверки папки {spam_folder}: {e}")
-                    continue
+            print(f"   📁 Проверяю директорию: {spam_dir}")
             
-            # Проверяем INBOX - если письмо там, проверяем заголовки
-            imap.select('INBOX')
-            # Ищем недавние письма
-            search_subject = subject[:30].replace('"', '\\"')
-            status, messages = imap.search(None, f'(SUBJECT "{search_subject}")')
-            if status == 'OK' and messages[0]:
-                # Получаем последние письма с такой темой
-                email_ids = messages[0].split()
-                for email_id in email_ids[-3:]:  # Проверяем последние 3
-                    try:
-                        status, msg_data = imap.fetch(email_id, '(RFC822)')
-                        if status == 'OK':
-                            msg = email.message_from_bytes(msg_data[0][1])
-                            msg_subject = decode_mime_words(msg.get('Subject', ''))
-                            # Проверяем, что это наше письмо
-                            if subject[:30] in msg_subject[:50] or msg_subject[:30] in subject[:50]:
-                                # Проверяем заголовки спама
-                                is_spam = check_email_is_spam(msg, imap=imap, message_id=email_id)
-                                imap.close()
-                                imap.logout()
-                                return is_spam
-                    except:
-                        continue
-            
-            imap.close()
-            imap.logout()
-            return False
-            
-        except Exception as e:
-            print(f"   ⚠️  Ошибка проверки спама: {e}")
             try:
-                imap.close()
-                imap.logout()
-            except:
-                pass
-            return False
+                # Ищем письма по времени модификации (последние 60 секунд)
+                current_time = time.time()
+                recent_files = []
+                
+                for email_file in spam_dir.iterdir():
+                    if email_file.is_file():
+                        # Проверяем время модификации файла
+                        file_mtime = email_file.stat().st_mtime
+                        if current_time - file_mtime < 60:  # Письма за последнюю минуту
+                            recent_files.append(email_file)
+                
+                print(f"      Найдено {len(recent_files)} недавних писем")
+                
+                # Проверяем содержимое недавних писем
+                for email_file in recent_files:
+                    try:
+                        with open(email_file, 'rb') as f:
+                            msg = email.message_from_bytes(f.read())
+                            msg_subject = decode_mime_words(msg.get('Subject', '')).lower()
+                            
+                            # Проверяем совпадение темы
+                            if subject_part in msg_subject or msg_subject[:50] in subject:
+                                print(f"   🚫 Письмо найдено в Spam: {email_file.name}")
+                                print(f"      Тема: {msg_subject[:100]}")
+                                return True
+                    except Exception as e:
+                        print(f"      ⚠️  Ошибка чтения файла {email_file.name}: {e}")
+                        continue
+                        
+            except Exception as e:
+                print(f"   ⚠️  Ошибка проверки директории {spam_dir}: {e}")
+                continue
+        
+        # Проверяем INBOX - если письмо там, проверяем заголовки спама
+        print(f"   📬 Проверяю INBOX...")
+        for inbox_dir in inbox_dirs:
+            if not inbox_dir.exists():
+                continue
             
+            print(f"   📁 Проверяю директорию: {inbox_dir}")
+            
+            try:
+                # Ищем письма по времени модификации
+                current_time = time.time()
+                recent_files = []
+                
+                for email_file in inbox_dir.iterdir():
+                    if email_file.is_file():
+                        file_mtime = email_file.stat().st_mtime
+                        if current_time - file_mtime < 60:
+                            recent_files.append(email_file)
+                
+                print(f"      Найдено {len(recent_files)} недавних писем")
+                
+                # Проверяем содержимое недавних писем
+                for email_file in recent_files:
+                    try:
+                        with open(email_file, 'rb') as f:
+                            msg = email.message_from_bytes(f.read())
+                            msg_subject = decode_mime_words(msg.get('Subject', '')).lower()
+                            
+                            # Проверяем совпадение темы
+                            if subject_part in msg_subject or msg_subject[:50] in subject:
+                                print(f"   ✅ Письмо найдено в INBOX: {email_file.name}")
+                                print(f"      Тема: {msg_subject[:100]}")
+                                
+                                # Проверяем заголовки спама
+                                spam_flag = msg.get('X-Spam-Flag', '').lower()
+                                spam_status = msg.get('X-Spam-Status', '').lower()
+                                spam_score = msg.get('X-Spam-Score', '')
+                                
+                                print(f"      X-Spam-Flag: {spam_flag}")
+                                print(f"      X-Spam-Status: {spam_status}")
+                                print(f"      X-Spam-Score: {spam_score}")
+                                
+                                # Проверяем заголовки через существующую функцию
+                                if check_email_is_spam(msg):
+                                    print(f"   🚫 Письмо помечено как спам через заголовки")
+                                    return True
+                                else:
+                                    print(f"   ✅ Письмо НЕ в спаме")
+                                    return False
+                    except Exception as e:
+                        print(f"      ⚠️  Ошибка чтения файла {email_file.name}: {e}")
+                        continue
+                        
+            except Exception as e:
+                print(f"   ⚠️  Ошибка проверки директории {inbox_dir}: {e}")
+                continue
+        
+        print(f"   ℹ️  Письмо не найдено ни в Spam, ни в INBOX (считаем что не в спаме)")
+        return False
+        
     except Exception as e:
-        print(f"   ⚠️  Ошибка подключения к IMAP для проверки спама: {e}")
+        print(f"   ⚠️  Ошибка проверки спама через maildir: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
