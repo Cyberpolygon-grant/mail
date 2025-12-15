@@ -163,7 +163,20 @@ def find_admin_container():
         str или None: Имя контейнера admin
     """
     try:
-        # Способ 1: Ищем через docker ps по имени
+        # Способ 1: Проверяем конкретное имя контейнера mail_admin_1
+        result = subprocess.run(
+            ['docker', 'ps', '--format', '{{.Names}}', '--filter', 'name=mail_admin_1'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        
+        if result.returncode == 0:
+            containers = [c.strip() for c in result.stdout.strip().split('\n') if c.strip()]
+            if containers:
+                return containers[0]
+        
+        # Способ 2: Ищем через docker ps по имени admin
         result = subprocess.run(
             ['docker', 'ps', '--format', '{{.Names}}', '--filter', 'name=admin'],
             capture_output=True,
@@ -176,7 +189,7 @@ def find_admin_container():
             if containers:
                 return containers[0]  # Возвращаем первый найденный контейнер admin
         
-        # Способ 2: Ищем через docker compose ps (если используется compose)
+        # Способ 3: Ищем через docker compose ps (если используется compose)
         try:
             result = subprocess.run(
                 ['docker', 'compose', 'ps', '--format', 'json', 'admin'],
@@ -193,7 +206,7 @@ def find_admin_container():
         except:
             pass
         
-        # Способ 3: Ищем все контейнеры и фильтруем по имени
+        # Способ 4: Ищем все контейнеры и фильтруем по имени
         result = subprocess.run(
             ['docker', 'ps', '--format', '{{.Names}}'],
             capture_output=True,
@@ -203,10 +216,22 @@ def find_admin_container():
         
         if result.returncode == 0:
             containers = [c.strip() for c in result.stdout.strip().split('\n') if c.strip()]
+            # Сначала ищем mail_admin_1
+            for container in containers:
+                if container == 'mail_admin_1' or 'mail_admin' in container.lower():
+                    return container
+            # Затем ищем любой контейнер с admin в имени
             for container in containers:
                 if 'admin' in container.lower():
                     return container
         
+        return None
+    except FileNotFoundError:
+        print(f"   ⚠️  Docker не найден или недоступен")
+        print(f"   💡 Убедитесь, что Docker установлен и доступен в PATH")
+        return None
+    except subprocess.TimeoutExpired:
+        print(f"   ⚠️  Таймаут при поиске контейнера admin")
         return None
     except Exception as e:
         print(f"   ⚠️  Ошибка поиска контейнера admin: {e}")
@@ -231,6 +256,7 @@ def get_user_spam_threshold(user_email):
         admin_container = os.getenv('MAILU_ADMIN_CONTAINER') or find_admin_container()
         if not admin_container:
             print(f"   ⚠️  Не удалось найти контейнер admin")
+            print(f"   💡 Установите переменную окружения MAILU_ADMIN_CONTAINER или убедитесь, что Docker запущен")
             return None
         
         db_path = '/data/main.db'
