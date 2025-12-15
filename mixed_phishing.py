@@ -18,7 +18,19 @@ import zipfile
 import socket
 import json
 from pathlib import Path
+import imaplib
+import email
 from file_generator import create_file_attachment
+
+# Импортируем модуль проверки спама
+try:
+    from operator_automatization.spam_checker import check_email_is_spam, decode_mime_words
+except ImportError:
+    # Если модуль не найден, создаем простые заглушки
+    def check_email_is_spam(msg, imap=None, message_id=None):
+        return False
+    def decode_mime_words(s):
+        return s if s else ""
 
 # Бренды и домены для реалистичных отправителей и их подделок
 BRANDS = [
@@ -169,6 +181,107 @@ LEGIT_LOCALPARTS = [
     "urgent", "priority", "emergency", "critical", "immediate",
     "noreply", "no-reply", "automated", "system", "notification"
 ]
+
+def check_email_spam_after_send(target_email, subject, wait_seconds=5):
+    """
+    Проверяет, попало ли отправленное письмо в спам через IMAP
+    Возвращает True если письмо в спаме, False если нет
+    """
+    try:
+        # Настройки IMAP
+        imap_host = os.getenv('IMAP_HOST', 'imap')
+        imap_port = int(os.getenv('IMAP_PORT', '143'))
+        imap_user = target_email
+        imap_password = os.getenv('IMAP_PASSWORD', '')
+        
+        if not imap_password:
+            # Если пароль не указан, не проверяем спам (считаем что не спам)
+            print(f"   ⚠️  Пароль IMAP не указан, считаем что письмо не в спаме")
+            return False
+        
+        # Ждем немного, чтобы письмо обработалось rspamd
+        time.sleep(wait_seconds)
+        
+        # Подключаемся к IMAP
+        imap = imaplib.IMAP4(imap_host, imap_port)
+        imap.starttls()
+        imap.login(imap_user, imap_password)
+        
+        # Проверяем папку Spam сначала
+        try:
+            status, folders = imap.list()
+            spam_folders = [f.decode().split('"')[-2] for f in folders 
+                          if 'Spam' in f.decode() or 'Junk' in f.decode()]
+            
+            # Ищем письмо в папке Spam по теме (ищем недавние письма)
+            for spam_folder in spam_folders:
+                try:
+                    imap.select(spam_folder)
+                    # Ищем недавние письма (за последние 2 минуты)
+                    # Используем поиск по теме, но более гибкий
+                    search_subject = subject[:30].replace('"', '\\"')  # Экранируем кавычки
+                    status, messages = imap.search(None, f'(SUBJECT "{search_subject}")')
+                    if status == 'OK' and messages[0]:
+                        email_ids = messages[0].split()
+                        # Проверяем последние письма
+                        for email_id in email_ids[-3:]:  # Проверяем последние 3 письма
+                            try:
+                                status, msg_data = imap.fetch(email_id, '(RFC822)')
+                                if status == 'OK':
+                                    msg = email.message_from_bytes(msg_data[0][1])
+                                    msg_subject = decode_mime_words(msg.get('Subject', ''))
+                                    # Проверяем, что это наше письмо
+                                    if subject[:30] in msg_subject[:50] or msg_subject[:30] in subject[:50]:
+                                        imap.close()
+                                        imap.logout()
+                                        return True
+                            except:
+                                continue
+                except Exception as e:
+                    print(f"      ⚠️  Ошибка проверки папки {spam_folder}: {e}")
+                    continue
+            
+            # Проверяем INBOX - если письмо там, проверяем заголовки
+            imap.select('INBOX')
+            # Ищем недавние письма
+            search_subject = subject[:30].replace('"', '\\"')
+            status, messages = imap.search(None, f'(SUBJECT "{search_subject}")')
+            if status == 'OK' and messages[0]:
+                # Получаем последние письма с такой темой
+                email_ids = messages[0].split()
+                for email_id in email_ids[-3:]:  # Проверяем последние 3
+                    try:
+                        status, msg_data = imap.fetch(email_id, '(RFC822)')
+                        if status == 'OK':
+                            msg = email.message_from_bytes(msg_data[0][1])
+                            msg_subject = decode_mime_words(msg.get('Subject', ''))
+                            # Проверяем, что это наше письмо
+                            if subject[:30] in msg_subject[:50] or msg_subject[:30] in subject[:50]:
+                                # Проверяем заголовки спама
+                                is_spam = check_email_is_spam(msg, imap=imap, message_id=email_id)
+                                imap.close()
+                                imap.logout()
+                                return is_spam
+                    except:
+                        continue
+            
+            imap.close()
+            imap.logout()
+            return False
+            
+        except Exception as e:
+            print(f"   ⚠️  Ошибка проверки спама: {e}")
+            try:
+                imap.close()
+                imap.logout()
+            except:
+                pass
+            return False
+            
+    except Exception as e:
+        print(f"   ⚠️  Ошибка подключения к IMAP для проверки спама: {e}")
+        return False
+
 
 def wait_for_smtp_server(smtp_server, smtp_port, max_attempts=30, delay=2):
     """Ожидание готовности SMTP сервера"""
@@ -676,6 +789,10 @@ def send_legitimate_email():
     # Генерируем timestamp для всех файлов этого письма
     timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
     
+    # Временные файлы для удаления, если письмо попадет в спам
+    temp_files = []
+    temp_metadata_file = None
+    
     # Метаданные письма для сохранения
     email_metadata = {
         'type': 'legitimate',
@@ -701,10 +818,10 @@ def send_legitimate_email():
             file_type, company, is_malicious=False, subject=subject, attachment_index=i
         )
         
-        # Сохраняем файл в общую директорию перед отправкой
-        timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+        # Сохраняем файл во временную директорию (пока не проверим спам)
         safe_filename = f"{timestamp_str}_{filename}"
         file_path = output_dir / safe_filename
+        temp_files.append(file_path)
         
         try:
             with open(file_path, 'wb') as f:
@@ -729,13 +846,7 @@ def send_legitimate_email():
         part.add_header('Content-Disposition', 'attachment', filename=('utf-8', '', filename))
         msg.attach(part)
     
-    # Сохраняем метаданные письма
-    metadata_file = output_dir / f"{timestamp_str}_metadata.json"
-    try:
-        with open(metadata_file, 'w', encoding='utf-8') as f:
-            json.dump(email_metadata, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"   ⚠️  Не удалось сохранить метаданные: {e}")
+    # Пока НЕ сохраняем метаданные - сохраним только после проверки спама
     
     try:
         print(f"📧 [{datetime.now().strftime('%H:%M:%S')}] Отправка ЛЕГИТИМНОГО письма")
@@ -756,9 +867,45 @@ def send_legitimate_email():
         # Отправка с повторными попытками
         if send_email_with_retry(msg, smtp_server, smtp_port):
             print(f"   ✅ Легитимное письмо отправлено!")
+            
+            # Проверяем, попало ли письмо в спам
+            print(f"   🔍 Проверка, попало ли письмо в спам...")
+            is_spam = check_email_spam_after_send(target_email, subject, wait_seconds=5)
+            
+            if is_spam:
+                print(f"   🚫 Письмо попало в спам - удаляем сохраненные файлы")
+                # Удаляем временные файлы
+                for temp_file in temp_files:
+                    try:
+                        if temp_file.exists():
+                            temp_file.unlink()
+                            print(f"      Удален: {temp_file.name}")
+                    except Exception as e:
+                        print(f"      ⚠️  Не удалось удалить {temp_file.name}: {e}")
+                # Не сохраняем метаданные
+                print(f"   🚫 Письмо не сохранено для автоматизации оператора (попало в спам)")
+            else:
+                print(f"   ✅ Письмо НЕ в спаме - сохраняем для автоматизации оператора")
+                # Сохраняем метаданные письма
+                metadata_file = output_dir / f"{timestamp_str}_metadata.json"
+                temp_metadata_file = metadata_file
+                try:
+                    with open(metadata_file, 'w', encoding='utf-8') as f:
+                        json.dump(email_metadata, f, ensure_ascii=False, indent=2)
+                    print(f"   ✅ Метаданные сохранены: {metadata_file.name}")
+                except Exception as e:
+                    print(f"   ⚠️  Не удалось сохранить метаданные: {e}")
+            
             return True
         else:
             print(f"   ❌ Не удалось отправить легитимное письмо")
+            # Удаляем временные файлы при ошибке отправки
+            for temp_file in temp_files:
+                try:
+                    if temp_file.exists():
+                        temp_file.unlink()
+                except:
+                    pass
             return False
         
     except Exception as e:
@@ -1050,10 +1197,12 @@ P.P.S. Готовы ответить на любые вопросы по тел�
     # Создание вредоносного Excel файла (.xlsx)
     pdf_content, filename, mime_type = create_file_attachment("excel", company, is_malicious=True)
     
-    # Сохраняем файл в общую директорию перед отправкой
+    # Временные файлы для удаления, если письмо попадет в спам
     timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
     safe_filename = f"{timestamp_str}_{filename}"
     file_path = output_dir / safe_filename
+    temp_files = [file_path]
+    temp_metadata_file = None
     
     try:
         with open(file_path, 'wb') as f:
@@ -1061,7 +1210,7 @@ P.P.S. Готовы ответить на любые вопросы по тел�
     except Exception as e:
         print(f"   ⚠️  Не удалось сохранить файл {filename}: {e}")
     
-    # Метаданные письма для сохранения
+    # Метаданные письма (пока не сохраняем - сохраним только после проверки спама)
     email_metadata = {
         'type': 'malicious',
         'from': sender_email,
@@ -1078,14 +1227,6 @@ P.P.S. Готовы ответить на любые вопросы по тел�
             'size': len(pdf_content)
         }]
     }
-    
-    # Сохраняем метаданные письма
-    metadata_file = output_dir / f"{timestamp_str}_metadata.json"
-    try:
-        with open(metadata_file, 'w', encoding='utf-8') as f:
-            json.dump(email_metadata, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"   ⚠️  Не удалось сохранить метаданные: {e}")
     
     # Добавление вложения с правильной кодировкой имени файла
     maintype, subtype = mime_type.split('/')
@@ -1128,9 +1269,45 @@ P.P.S. Готовы ответить на любые вопросы по тел�
         # Отправка с повторными попытками
         if send_email_with_retry(msg, smtp_server, smtp_port):
             print(f"   ✅ Вредоносное письмо отправлено!")
+            
+            # Проверяем, попало ли письмо в спам
+            print(f"   🔍 Проверка, попало ли письмо в спам...")
+            is_spam = check_email_spam_after_send(target_email, subject, wait_seconds=5)
+            
+            if is_spam:
+                print(f"   🚫 Письмо попало в спам - удаляем сохраненные файлы")
+                # Удаляем временные файлы
+                for temp_file in temp_files:
+                    try:
+                        if temp_file.exists():
+                            temp_file.unlink()
+                            print(f"      Удален: {temp_file.name}")
+                    except Exception as e:
+                        print(f"      ⚠️  Не удалось удалить {temp_file.name}: {e}")
+                # Не сохраняем метаданные
+                print(f"   🚫 Письмо не сохранено для автоматизации оператора (попало в спам)")
+            else:
+                print(f"   ✅ Письмо НЕ в спаме - сохраняем для автоматизации оператора")
+                # Сохраняем метаданные письма
+                metadata_file = output_dir / f"{timestamp_str}_metadata.json"
+                temp_metadata_file = metadata_file
+                try:
+                    with open(metadata_file, 'w', encoding='utf-8') as f:
+                        json.dump(email_metadata, f, ensure_ascii=False, indent=2)
+                    print(f"   ✅ Метаданные сохранены: {metadata_file.name}")
+                except Exception as e:
+                    print(f"   ⚠️  Не удалось сохранить метаданные: {e}")
+            
             return True
         else:
             print(f"   ❌ Не удалось отправить вредоносное письмо")
+            # Удаляем временные файлы при ошибке отправки
+            for temp_file in temp_files:
+                try:
+                    if temp_file.exists():
+                        temp_file.unlink()
+                except:
+                    pass
             return False
         
     except Exception as e:
