@@ -1377,7 +1377,7 @@ def check_email_spam_in_container(container_name, maildir_path, target_email, su
     
     return {'found': False, 'is_spam': False}
 
-def check_email_spam_after_send(target_email, subject, message_id=None, wait_seconds=8, is_malicious=False):
+def check_email_spam_after_send(target_email, subject, message_id=None, wait_seconds=8, is_malicious=False, sender_email=None):
     """
     Проверка спама по заголовкам письма через IMAP подключение (как в test.py)
     Если X-Spam: Yes → СПАМ (не сохраняем)
@@ -1385,6 +1385,7 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
     
     Args:
         is_malicious: True если это malicious письмо, False если легитимное
+        sender_email: Email отправителя для гибкого поиска по From + Date
     """
     info = {
         "message_id": message_id,
@@ -1401,7 +1402,7 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
     clear_spam_threshold_cache(target_email)
     
     # Ждем обработки rspamd
-    wait_time = max(wait_seconds, 20)  # Минимум 20 секунд для надежности
+    wait_time = max(wait_seconds, 3)  # Минимум 3 секунды
     print(f"   ⏳ Ожидание {wait_time} сек для обработки rspamd...")
     time.sleep(wait_time)
     
@@ -1515,33 +1516,96 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
             info["reason"] = "no_emails_in_inbox"
             return (True, info)  # При отсутствии писем НЕ сохраняем
         
-        # Берем последние письма (до 20 самых новых для надежности)
+        # Многоуровневый гибкий поиск письма
         subject_lower = (subject or "").lower()
         msgid_clean = message_id.strip().strip('<>') if message_id else None
         
-        print(f"   🔍 Ищем письмо: Message-ID={msgid_clean[:50] if msgid_clean else 'N/A'}, Subject={subject[:50] if subject else 'N/A'}")
-        print(f"   📧 Всего писем в INBOX: {len(email_ids)}, проверяем последние {min(20, len(email_ids))}")
+        print(f"   🔍 Ищем письмо: Message-ID={msgid_clean[:50] if msgid_clean else 'N/A'}, Subject={subject[:50] if subject else 'N/A'}, From={sender_email[:50] if sender_email else 'N/A'}")
+        print(f"   📧 Всего писем в INBOX: {len(email_ids)}")
         
-        # ШАГ 1: СНАЧАЛА НАХОДИМ ПРАВИЛЬНОЕ ПИСЬМО (только Message-ID и Subject)
-        # Делаем несколько попыток поиска с небольшими задержками
         found_email_id = None
         found_raw_email = None
-        max_search_attempts = 3
-        search_delay = 3
         
-        for search_attempt in range(max_search_attempts):
-            if search_attempt > 0:
-                print(f"   🔄 Повторная попытка поиска письма ({search_attempt + 1}/{max_search_attempts})...")
-                time.sleep(search_delay)
-                # Обновляем список писем
-                status, messages = mail.search(None, 'ALL')
-                if status != 'OK':
-                    break
-                email_ids = messages[0].split()
-                if not email_ids:
-                    break
-            
-            for email_id in reversed(email_ids[-20:]):
+        # УРОВЕНЬ 1: Поиск по From + Date (письма от отправителя за последние 3 минуты)
+        if sender_email and not found_email_id:
+            try:
+                # Вычисляем дату 3 минуты назад в формате IMAP
+                search_date = (datetime.now() - timedelta(minutes=3)).strftime('%d-%b-%Y')
+                # Ищем письма от отправителя за последние 3 минуты
+                search_criteria = f'(FROM "{sender_email}" SINCE {search_date})'
+                print(f"   🔍 Уровень 1: Поиск по From + Date (последние 3 минуты)...")
+                status, messages = mail.search(None, search_criteria)
+                if status == 'OK' and messages[0]:
+                    candidate_ids = messages[0].split()
+                    print(f"      Найдено {len(candidate_ids)} кандидатов по From + Date")
+                    # Проверяем кандидатов
+                    for email_id in reversed(candidate_ids[-10:]):  # Берем последние 10
+                        try:
+                            status, msg_data = mail.fetch(email_id, '(RFC822)')
+                            if status != 'OK':
+                                continue
+                            raw_email = msg_data[0][1]
+                            raw_str = raw_email.decode('utf-8', errors='ignore') if isinstance(raw_email, bytes) else str(raw_email)
+                            
+                            # Проверяем Subject (частичное совпадение)
+                            if subject:
+                                subject_match = False
+                                for line in raw_str.split('\n')[:50]:  # Проверяем только заголовки
+                                    if line.lower().startswith('subject:'):
+                                        msg_subject = line.split(':', 1)[1].strip().lower()
+                                        if subject_lower[:30] in msg_subject or msg_subject[:30] in subject_lower:
+                                            subject_match = True
+                                            break
+                                
+                                if subject_match:
+                                    found_email_id = email_id
+                                    found_raw_email = raw_email
+                                    print(f"      ✅ Найдено по From + Date + Subject")
+                                    break
+                        except Exception as e:
+                            continue
+            except Exception as e:
+                print(f"      ⚠️ Ошибка поиска по From + Date: {e}")
+        
+        # УРОВЕНЬ 2: Поиск по всем письмам за последние 3 минуты + Subject
+        if not found_email_id and subject:
+            try:
+                search_date = (datetime.now() - timedelta(minutes=3)).strftime('%d-%b-%Y')
+                search_criteria = f'(SINCE {search_date})'
+                print(f"   🔍 Уровень 2: Поиск по Date + Subject (все письма за последние 3 минуты)...")
+                status, messages = mail.search(None, search_criteria)
+                if status == 'OK' and messages[0]:
+                    candidate_ids = messages[0].split()
+                    print(f"      Найдено {len(candidate_ids)} кандидатов по Date")
+                    # Проверяем кандидатов по Subject
+                    for email_id in reversed(candidate_ids[-15:]):  # Берем последние 15
+                        try:
+                            status, msg_data = mail.fetch(email_id, '(RFC822)')
+                            if status != 'OK':
+                                continue
+                            raw_email = msg_data[0][1]
+                            raw_str = raw_email.decode('utf-8', errors='ignore') if isinstance(raw_email, bytes) else str(raw_email)
+                            
+                            # Проверяем Subject (частичное совпадение)
+                            for line in raw_str.split('\n')[:50]:
+                                if line.lower().startswith('subject:'):
+                                    msg_subject = line.split(':', 1)[1].strip().lower()
+                                    if subject_lower[:30] in msg_subject or msg_subject[:30] in subject_lower:
+                                        found_email_id = email_id
+                                        found_raw_email = raw_email
+                                        print(f"      ✅ Найдено по Date + Subject")
+                                        break
+                            if found_email_id:
+                                break
+                        except Exception as e:
+                            continue
+            except Exception as e:
+                print(f"      ⚠️ Ошибка поиска по Date + Subject: {e}")
+        
+        # УРОВЕНЬ 3: Традиционный поиск по Message-ID и Subject (последние 30 писем)
+        if not found_email_id:
+            print(f"   🔍 Уровень 3: Традиционный поиск по Message-ID/Subject (последние 30 писем)...")
+            for email_id in reversed(email_ids[-30:]):  # Увеличили до 30
                 try:
                     status, msg_data = mail.fetch(email_id, '(RFC822)')
                     if status != 'OK':
@@ -1648,10 +1712,6 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                 except Exception as e:
                     print(f"      ⚠️ Ошибка при поиске письма: {e}")
                     continue
-            
-            # Если нашли письмо, выходим из цикла попыток
-            if found_email_id:
-                break
         
         # ШАГ 2: ЕСЛИ НАШЛИ ПИСЬМО - ПАРСИМ ЕГО ЗАГОЛОВКИ
         if found_email_id and found_raw_email:
@@ -1900,10 +1960,11 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
             info["reason"] = "x_spam_no_or_missing"
             return (False, info)
         
-        # Если не нашли письмо после всех попыток - НЕ СОХРАНЯЕМ
-        print(f"   🚫 Письмо не найдено в INBOX после {max_search_attempts} попыток поиска")
+        # Если не нашли письмо после многоуровневого поиска - НЕ СОХРАНЯЕМ
+        print(f"   🚫 Письмо не найдено в INBOX после многоуровневого поиска")
         print(f"      Message-ID: {msgid_clean[:50] if msgid_clean else 'N/A'}")
         print(f"      Subject: {subject[:50] if subject else 'N/A'}")
+        print(f"      From: {sender_email[:50] if sender_email else 'N/A'}")
         print(f"      Всего писем в INBOX: {len(email_ids)}")
         print(f"   🚫 РЕШЕНИЕ: Письмо не найдено → НЕ СОХРАНЯЕМ для автоматизации оператора")
         
@@ -1913,10 +1974,10 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
         user_spam_threshold = user_spam_settings.get('spam_threshold') if user_spam_settings else None
         user_spam_enabled = user_spam_settings.get('spam_enabled') if user_spam_settings else None
         if user_spam_threshold is not None:
-            log_line = f"ПАРАМЕТРЫ СПАМА | Тема: {subject[:50]} | Письмо не найдено в INBOX после {max_search_attempts} попыток | Уровень спама пользователя (spam_threshold): {user_spam_threshold} | Спам-фильтр включен (spam_enabled): {user_spam_enabled}"
+            log_line = f"ПАРАМЕТРЫ СПАМА | Тема: {subject[:50]} | Письмо не найдено в INBOX после многоуровневого поиска | Уровень спама пользователя (spam_threshold): {user_spam_threshold} | Спам-фильтр включен (spam_enabled): {user_spam_enabled}"
             append_send_attachs_log_line(output_dir, log_line)
         
-        info["reason"] = f"email_not_found_in_imap_after_{max_search_attempts}_attempts"
+        info["reason"] = "email_not_found_in_imap_after_multilevel_search"
         info["user_spam_threshold"] = user_spam_threshold
         info["user_spam_enabled"] = user_spam_enabled
         return (True, info)  # При отсутствии письма НЕ сохраняем (fail-close)
@@ -2527,7 +2588,7 @@ def send_legitimate_email():
             
             # Проверяем, попало ли письмо в спам
             print(f"   🔍 Проверка, попало ли письмо в спам...")
-            is_spam, spam_info = check_email_spam_after_send(target_email, subject, message_id=msg_id, wait_seconds=8)
+            is_spam, spam_info = check_email_spam_after_send(target_email, subject, message_id=msg_id, wait_seconds=8, sender_email=sender_email)
             
             if is_spam:
                 spam_reason_detail = spam_info.get("reason", "неизвестно")
@@ -2982,7 +3043,7 @@ P.P.S. Готовы ответить на любые вопросы по тел�
             
             # Проверяем, попало ли письмо в спам
             print(f"   🔍 Проверка, попало ли письмо в спам...")
-            is_spam, spam_info = check_email_spam_after_send(target_email, subject, message_id=msg_id, wait_seconds=8, is_malicious=True)
+            is_spam, spam_info = check_email_spam_after_send(target_email, subject, message_id=msg_id, wait_seconds=8, is_malicious=True, sender_email=sender_email)
             
             if is_spam:
                 spam_reason_detail = spam_info.get("reason", "неизвестно")
