@@ -2871,7 +2871,8 @@ P.P.S. Готовы ответить на любые вопросы по тел�
         print(f"   Попробуйте запустить контейнер с правами root или исправить права на volume")
     
     # Создание вредоносного Excel файла (.xlsx)
-    pdf_content, filename, mime_type = create_file_attachment("excel", company, is_malicious=True)
+    # Передаем subject для генерации реалистичного имени файла
+    pdf_content, filename, mime_type = create_file_attachment("excel", company, is_malicious=True, subject=subject)
     
     # Timestamp для имен файлов
     timestamp_str = now_moscow().strftime('%Y%m%d_%H%M%S_%f')
@@ -3215,11 +3216,11 @@ def mixed_phishing_attack():
     
     print("=" * 60 + "\n")
     
-    print("🚀 ВРЕДОНОСНАЯ ФИШИНГОВАЯ АТАКА")
+    print("🚀 СМЕШАННАЯ ФИШИНГОВАЯ АТАКА")
     print("=" * 50)
     print(f"🎯 Цель: {target_email}")
     print(f"⏰ Интервал: каждые 5 секунд")
-    print(f"📊 Режим: ТОЛЬКО ВРЕДОНОСНЫЕ письма")
+    print(f"📊 Соотношение: 50% легитимных, 50% вредоносных")
     print(f"🛑 Для остановки нажмите Ctrl+C")
     print("=" * 50)
     
@@ -3228,9 +3229,13 @@ def mixed_phishing_attack():
     
     while True:
         try:
-            # Отправляем только вредоносные письма
-            if send_malicious_email():
-                malicious_count += 1
+            # 50% вероятность легитимного письма, 50% вредоносного
+            if random.random() < 0.5:
+                if send_legitimate_email():
+                    legitimate_count += 1
+            else:
+                if send_malicious_email():
+                    malicious_count += 1
             
             print(f"⏳ Ожидание 5 секунд до следующей отправки...")
             for i in range(5, 0, -1):
