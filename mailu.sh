@@ -32,84 +32,41 @@ build_and_start() {
     echo "✅ Система запущена"
     echo "🌐 Веб-почта: http://financepro.ru/webmail/"
     echo "🔧 Админка: http://financepro.ru/admin/"
-}
-
-create_users() {
-    echo "👤 Создание администратора почты..."
-    sleep 5
     
-    # Создаем администратора почты
-    ADMIN_EMAIL="admin@financepro.ru"
-    ADMIN_PASSWORD="admin123"
-    ADMIN_LOCALPART="admin"
-    ADMIN_DOMAIN="financepro.ru"
+    # Ждем, пока сервисы запустятся
+    echo ""
+    echo "⏳ Ожидание запуска сервисов..."
+    sleep 10
     
-    echo "🔐 Создание администратора: $ADMIN_EMAIL"
+    # Создаем пользователя operator1
+    echo ""
+    echo "👤 Создание пользователя operator1..."
+    echo "📧 Создание: operator1@financepro.ru"
+    docker compose exec admin flask mailu user operator1 financepro.ru '1q2w#E$R' 2>/dev/null || echo "   ⚠️  Уже существует или ошибка создания"
     
-    # Пробуем создать администратора через команду flask mailu admin
-    echo "   Попытка 1: Создание через flask mailu admin..."
-    ADMIN_CREATED=$(docker compose exec -T admin flask mailu admin "$ADMIN_EMAIL" "$ADMIN_PASSWORD" 2>&1)
-    
-    if [ $? -eq 0 ]; then
-        echo "   ✅ Администратор создан через flask mailu admin"
-        # Отключаем требование смены пароля для администратора
-        echo "   🔧 Отключение требования смены пароля..."
-        docker compose exec admin python3 -c "
+    # Отключаем требование смены пароля при первом входе
+    echo "🔧 Отключение требования смены пароля при первом входе..."
+    docker compose exec admin python3 -c "
 import sqlite3
 db_path = '/data/main.db'
-admin_email = '$ADMIN_EMAIL'
 try:
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    cursor.execute('UPDATE \"user\" SET change_pw_next_login = 0 WHERE email = ?', (admin_email,))
+    # Устанавливаем change_pw_next_login в 0 (False)
+    cursor.execute('UPDATE \"user\" SET change_pw_next_login = 0 WHERE email = ?', ('operator1@financepro.ru',))
     conn.commit()
     conn.close()
     print('✅ Требование смены пароля отключено')
 except Exception as e:
     print(f'⚠️  Ошибка: {e}')
 " 2>/dev/null || echo "   ⚠️  Не удалось отключить требование смены пароля"
-    else
-        echo "   ⚠️  Команда flask mailu admin не сработала, пробуем альтернативный способ..."
-        
-        # Альтернативный способ: создаем пользователя, затем делаем администратором
-        echo "   Попытка 2: Создание пользователя и назначение прав администратора..."
-        docker compose exec admin flask mailu user "$ADMIN_LOCALPART" "$ADMIN_DOMAIN" "$ADMIN_PASSWORD" 2>/dev/null || echo "   ⚠️  Пользователь уже существует"
-        
-        # Делаем его администратором через SQL
-        echo "   🔧 Назначение прав администратора через SQL..."
-        docker compose exec admin python3 -c "
-import sqlite3
-db_path = '/data/main.db'
-admin_email = '$ADMIN_EMAIL'
-try:
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    
-    # Проверяем, существует ли пользователь
-    cursor.execute('SELECT email, admin FROM \"user\" WHERE email = ?', (admin_email,))
-    user_data = cursor.fetchone()
-    
-    if user_data:
-        # Устанавливаем change_pw_next_login в 0 (False) для администратора
-        cursor.execute('UPDATE \"user\" SET change_pw_next_login = 0 WHERE email = ?', (admin_email,))
-        # Делаем пользователя администратором
-        cursor.execute('UPDATE \"user\" SET admin = 1 WHERE email = ?', (admin_email,))
-        conn.commit()
-        print('✅ Администратор создан и настроен')
-    else:
-        print('⚠️  Пользователь не найден в базе данных')
-        print('💡 Попробуйте создать пользователя вручную через веб-интерфейс')
-    
-    conn.close()
-except Exception as e:
-    print(f'⚠️  Ошибка: {e}')
-    import traceback
-    traceback.print_exc()
-" 2>/dev/null || echo "   ⚠️  Не удалось настроить администратора"
-    fi
     
     echo ""
-    
+    echo "✅ Пользователь operator1 создан"
+    echo "📧 operator1@financepro.ru / 1q2w#E\$R - Оператор ДБО #1 (жертва)"
+}
+
+create_users() {
     echo "👤 Создание пользователя operator1..."
     sleep 2
     echo "📧 Создание: operator1@financepro.ru"
@@ -133,17 +90,14 @@ except Exception as e:
 " 2>/dev/null || echo "   ⚠️  Не удалось отключить требование смены пароля"
     echo ""
     
-    echo "✅ Пользователи созданы"
+    echo "✅ Пользователь создан"
     echo ""
-    echo "👤 УЧЕТНЫЕ ЗАПИСИ:"
-    echo "   🔐 $ADMIN_EMAIL / $ADMIN_PASSWORD - Администратор почты"
-    echo "   📧 operator1@financepro.ru / 1q2w#E$R - Оператор ДБО #1 (жертва)"
+    echo "👤 УЧЕТНАЯ ЗАПИСЬ:"
+    echo "   📧 operator1@financepro.ru / 1q2w#E\$R - Оператор ДБО #1 (жертва)"
     echo ""
     echo "🌐 ДОСТУП К ПОЧТЕ:"
     echo "   Веб-интерфейс: http://financepro.ru/webmail"
     echo "   Админка: http://financepro.ru/admin"
-    echo ""
-    echo "💡 Войдите в админку как $ADMIN_EMAIL для управления настройками"
 }
 
 show_logs() {
