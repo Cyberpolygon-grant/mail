@@ -26,9 +26,9 @@ show_help() {
 build_and_start() {
     echo "🚀 Запуск Mailu с фишинговой атакой..."
     echo "🔨 Сборка образа..."
-    docker compose build phishing-demo
+    docker-compose build phishing-demo
     echo "📦 Запуск сервисов..."
-    docker compose --profile phishing up -d
+    docker-compose --profile phishing up -d
     echo "✅ Система запущена"
     echo "🌐 Веб-почта: http://financepro.ru/webmail/"
     echo "🔧 Админка: http://financepro.ru/admin/"
@@ -42,11 +42,11 @@ build_and_start() {
     echo ""
     echo "👤 Создание пользователя operator1..."
     echo "📧 Создание: operator1@financepro.ru"
-    docker compose exec admin flask mailu user operator1 financepro.ru '1q2w#E$R' 2>/dev/null || echo "   ⚠️  Уже существует или ошибка создания"
+    docker-compose exec admin flask mailu user operator1 financepro.ru '1q2w#E$R' 2>/dev/null || echo "   ⚠️  Уже существует или ошибка создания"
     
     # Отключаем требование смены пароля при первом входе
     echo "🔧 Отключение требования смены пароля при первом входе..."
-    docker compose exec admin python3 -c "
+    docker-compose exec admin python3 -c "
 import sqlite3
 db_path = '/data/main.db'
 try:
@@ -70,11 +70,11 @@ create_users() {
     echo "👤 Создание пользователя operator1..."
     sleep 2
     echo "📧 Создание: operator1@financepro.ru"
-    docker compose exec admin flask mailu user operator1 financepro.ru '1q2w#E$R' 2>/dev/null || echo "   ⚠️  Уже существует"
+    docker-compose exec admin flask mailu user operator1 financepro.ru '1q2w#E$R' 2>/dev/null || echo "   ⚠️  Уже существует"
     
     # Отключаем требование смены пароля при первом входе
     echo "🔧 Отключение требования смены пароля при первом входе..."
-    docker compose exec admin python3 -c "
+    docker-compose exec admin python3 -c "
 import sqlite3
 db_path = '/data/main.db'
 try:
@@ -102,28 +102,28 @@ except Exception as e:
 
 show_logs() {
     echo "📊 Логи фишинговой атаки:"
-    docker compose logs phishing-demo
+    docker-compose logs phishing-demo
 }
 
 show_status() {
     echo "📋 Статус сервисов:"
-    docker compose ps
+    docker-compose ps
 }
 
 stop_all() {
     echo "🛑 Остановка всех сервисов..."
-    docker compose --profile phishing down
+    docker-compose --profile phishing down
     echo "✅ Все сервисы остановлены"
 }
 
 clean_all() {
     echo "🧹 Полная очистка системы..."
     echo "1. Остановка всех контейнеров..."
-    docker compose down
+    docker-compose down
     echo "2. Удаление данных Mailu..."
     sudo rm -rf /mailu/
     echo "3. Удаление образов..."
-    docker compose down -v
+    docker-compose down -v
     echo "✅ Система полностью очищена"
 }
 
