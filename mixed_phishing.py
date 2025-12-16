@@ -1548,19 +1548,109 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                     x_spam_level = email_message.get('X-Spam-Level', '').strip()
                     
                     # Получаем X-Spamd-Bar - формат: "+++++++" (только плюсы подряд)
-                    # Оптимизированный алгоритм парсинга заголовка
+                    # ПРИОРИТЕТ: сначала парсим из сырых данных, чтобы получить точное значение
                     x_spamd_bar = ''
                     x_spamd_bar_raw = None
+                    parse_method = None
                     
-                    # Способ 1: через email_message.get() - основной способ
+                    # СПОСОБ 1: Парсим из сырых данных ПЕРВЫМ (самый надежный способ)
                     try:
-                        x_spamd_bar_raw = email_message.get('X-Spamd-Bar', '')
-                        if x_spamd_bar_raw:
-                            x_spamd_bar = str(x_spamd_bar_raw).strip()
+                        # Пробуем разные кодировки для декодирования
+                        raw_str = None
+                        for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
+                            try:
+                                raw_str = raw_email.decode(encoding, errors='ignore')
+                                break
+                            except:
+                                continue
+                        
+                        if raw_str:
+                            # Ищем заголовок в сырых данных (может быть многострочным)
+                            lines = raw_str.split('\n')
+                            x_spamd_bar_parts = []
+                            in_x_spamd_bar = False
+                            headers_end = False
+                            
+                            for i, line in enumerate(lines):
+                                # Проверяем, не закончились ли заголовки (пустая строка)
+                                if not line.strip():
+                                    if in_x_spamd_bar:
+                                        # Заголовок закончился
+                                        break
+                                    headers_end = True
+                                    continue
+                                
+                                # Если уже прошли заголовки, прекращаем поиск
+                                if headers_end:
+                                    break
+                                
+                                # Проверяем начало заголовка (регистронезависимо, может быть с пробелами в начале)
+                                line_stripped = line.strip()
+                                line_lower = line_stripped.lower()
+                                
+                                # Ищем заголовок X-Spamd-Bar (может быть с пробелами или без пробела после двоеточия)
+                                if 'x-spamd-bar' in line_lower:
+                                    # Начало заголовка - ищем двоеточие
+                                    colon_idx = line_stripped.find(':')
+                                    if colon_idx >= 0:
+                                        # Берем все после двоеточия (может быть без пробела)
+                                        value = line_stripped[colon_idx + 1:].strip()
+                                        if value:
+                                            x_spamd_bar_parts.append(value)
+                                        # Даже если значение пустое, отмечаем что нашли заголовок
+                                        # (может быть продолжение на следующей строке)
+                                        in_x_spamd_bar = True
+                                elif in_x_spamd_bar:
+                                    # Проверяем, является ли это продолжением многострочного заголовка
+                                    if line.startswith(' ') or line.startswith('\t'):
+                                        # Продолжение многострочного заголовка
+                                        x_spamd_bar_parts.append(line_stripped)
+                                    else:
+                                        # Конец заголовка (начался новый заголовок)
+                                        break
+                            
+                            if x_spamd_bar_parts:
+                                # Объединяем все части заголовка
+                                x_spamd_bar = ''.join(x_spamd_bar_parts).strip()
+                                parse_method = "сырые данные"
+                                print(f"      ✅ X-Spamd-Bar получен из сырых данных: '{x_spamd_bar}' (частей: {len(x_spamd_bar_parts)})")
                     except Exception as e:
-                        print(f"      DEBUG: Ошибка получения X-Spamd-Bar через get(): {e}")
+                        print(f"      DEBUG: Ошибка парсинга из сырых данных: {e}")
+                        import traceback
+                        print(f"      DEBUG: Traceback: {traceback.format_exc()}")
                     
-                    # Способ 2: через прямой доступ к заголовкам (если get() не сработал)
+                    # СПОСОБ 2: через email_message.get() - если сырые данные не сработали
+                    if not x_spamd_bar:
+                        try:
+                            x_spamd_bar_raw = email_message.get('X-Spamd-Bar', '')
+                            if x_spamd_bar_raw:
+                                # Декодируем заголовок, если он закодирован в MIME формате
+                                decoded_value = None
+                                try:
+                                    # Пробуем декодировать MIME заголовок
+                                    from email.header import decode_header
+                                    decoded_parts = decode_header(str(x_spamd_bar_raw))
+                                    decoded_chunks = []
+                                    for part, encoding in decoded_parts:
+                                        if isinstance(part, bytes):
+                                            if encoding:
+                                                decoded_chunks.append(part.decode(encoding, errors='ignore'))
+                                            else:
+                                                decoded_chunks.append(part.decode('utf-8', errors='ignore'))
+                                        else:
+                                            decoded_chunks.append(str(part))
+                                    decoded_value = ''.join(decoded_chunks).strip()
+                                except:
+                                    # Если декодирование не удалось, используем как есть
+                                    decoded_value = str(x_spamd_bar_raw).strip()
+                                
+                                x_spamd_bar = decoded_value
+                                parse_method = "email_message.get()"
+                                print(f"      ✅ X-Spamd-Bar получен через get(): '{x_spamd_bar}'")
+                        except Exception as e:
+                            print(f"      DEBUG: Ошибка получения X-Spamd-Bar через get(): {e}")
+                    
+                    # СПОСОБ 3: через прямой доступ к заголовкам
                     if not x_spamd_bar:
                         try:
                             # Пробуем получить через items() или _headers
@@ -1568,88 +1658,68 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                                 for header_name, header_value in email_message._headers:
                                     if header_name.lower() == 'x-spamd-bar':
                                         x_spamd_bar = str(header_value).strip()
+                                        parse_method = "_headers"
+                                        print(f"      ✅ X-Spamd-Bar получен через _headers: '{x_spamd_bar}'")
                                         break
                             # Также пробуем через items()
                             if not x_spamd_bar and hasattr(email_message, 'items'):
                                 for header_name, header_value in email_message.items():
                                     if header_name.lower() == 'x-spamd-bar':
                                         x_spamd_bar = str(header_value).strip()
+                                        parse_method = "items()"
+                                        print(f"      ✅ X-Spamd-Bar получен через items(): '{x_spamd_bar}'")
                                         break
                         except Exception as e:
                             print(f"      DEBUG: Ошибка получения через _headers/items(): {e}")
                     
-                    # Способ 3: парсим из сырых данных (только если заголовок не найден)
-                    if not x_spamd_bar:
-                        try:
-                            # Пробуем разные кодировки для декодирования
-                            raw_str = None
-                            for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
-                                try:
-                                    raw_str = raw_email.decode(encoding, errors='ignore')
-                                    break
-                                except:
-                                    continue
-                            
-                            if raw_str:
-                                # Ищем заголовок в сырых данных (может быть многострочным)
-                                lines = raw_str.split('\n')
-                                x_spamd_bar_parts = []
-                                in_x_spamd_bar = False
-                                
-                                for line in lines:
-                                    if not line.strip():
-                                        break  # Конец заголовков
-                                    
-                                    line_lower = line.lower().strip()
-                                    # Проверяем начало заголовка (может быть с пробелами или табуляцией)
-                                    if 'x-spamd-bar' in line_lower and ':' in line:
-                                        # Начало заголовка
-                                        colon_idx = line.find(':')
-                                        if colon_idx >= 0:
-                                            value = line[colon_idx + 1:].strip()
-                                            if value:
-                                                x_spamd_bar_parts.append(value)
-                                        in_x_spamd_bar = True
-                                    elif in_x_spamd_bar and (line.startswith(' ') or line.startswith('\t')):
-                                        # Продолжение многострочного заголовка
-                                        x_spamd_bar_parts.append(line.strip())
-                                    elif in_x_spamd_bar:
-                                        # Конец заголовка
-                                        break
-                                
-                                if x_spamd_bar_parts:
-                                    x_spamd_bar = ''.join(x_spamd_bar_parts).strip()
-                                    print(f"      DEBUG: X-Spamd-Bar получен из сырых данных: '{x_spamd_bar}'")
-                        except Exception as e:
-                            print(f"      DEBUG: Ошибка парсинга из сырых данных: {e}")
-                    
-                    # Нормализуем заголовок: оставляем только плюсы и минусы (убираем пробелы и другие символы)
+                    # Нормализуем заголовок: оставляем ТОЛЬКО плюсы и минусы (убираем ВСЕ остальные символы)
+                    original_bar = x_spamd_bar if x_spamd_bar else ''
                     if x_spamd_bar:
-                        # Оставляем только символы + и - из заголовка
+                        # Оставляем только символы + и - из заголовка (убираем пробелы, табуляции и все остальное)
+                        # Это критично, так как заголовок может содержать пробелы между плюсами
                         normalized_bar = ''.join(c for c in x_spamd_bar if c in '+-')
                         if normalized_bar != x_spamd_bar:
-                            print(f"      DEBUG: Нормализация X-Spamd-Bar: '{x_spamd_bar}' → '{normalized_bar}'")
+                            print(f"      🔧 Нормализация: '{x_spamd_bar}' → '{normalized_bar}'")
+                            print(f"         (удалены символы: {set(x_spamd_bar) - set('+-')})")
                             x_spamd_bar = normalized_bar
+                        # Дополнительная проверка: если после нормализации пусто, значит были только пробелы/другие символы
+                        if not x_spamd_bar and original_bar:
+                            print(f"      ⚠️ После нормализации заголовок стал пустым! Исходное: '{original_bar}'")
                     
                     # Подсчитываем количество '+' в X-Spamd-Bar (только плюсы, минусы не считаем)
                     spamd_bar_plus_count = x_spamd_bar.count('+') if x_spamd_bar else 0
                     
+                    # Критическая проверка: если получили только 1 плюс, но исходный заголовок был длиннее - что-то не так
+                    if spamd_bar_plus_count == 1 and original_bar and len(original_bar) > 2:
+                        print(f"      ⚠️⚠️⚠️ ПОДОЗРИТЕЛЬНО: Найдено только 1 плюс, но исходный заголовок длиннее!")
+                        print(f"         Исходный: '{original_bar}' (длина: {len(original_bar)})")
+                        print(f"         Нормализованный: '{x_spamd_bar}' (длина: {len(x_spamd_bar)})")
+                        print(f"         Все символы исходного: {[c for c in original_bar]}")
+                        print(f"         Коды символов: {[ord(c) for c in original_bar]}")
+                    
                     # Отладочный вывод для диагностики парсинга
                     print(f"      🔍 ПАРСИНГ X-Spamd-Bar:")
-                    print(f"         - Через get(): {repr(x_spamd_bar_raw)}")
+                    print(f"         - Метод получения: {parse_method or 'не найден'}")
+                    if x_spamd_bar_raw:
+                        print(f"         - Через get(): {repr(x_spamd_bar_raw)}")
+                    if original_bar and original_bar != x_spamd_bar:
+                        print(f"         - Исходное значение: '{original_bar}'")
                     print(f"         - Финальное значение: '{x_spamd_bar}' (длина: {len(x_spamd_bar) if x_spamd_bar else 0})")
-                    print(f"         - Количество '+' знаков: {spamd_bar_plus_count}")
+                    print(f"         - ⭐ Количество '+' знаков: {spamd_bar_plus_count}")
                     if x_spamd_bar:
                         # Показываем детальную информацию о символах
                         plus_count = x_spamd_bar.count('+')
                         minus_count = x_spamd_bar.count('-')
-                        other_chars = [c for c in x_spamd_bar if c not in '+-']
+                        other_chars = [c for c in original_bar if c not in '+-'] if original_bar else []
                         if other_chars:
-                            print(f"         - ⚠️ Обнаружены посторонние символы: {other_chars}")
+                            print(f"         - ⚠️ В исходном заголовке были посторонние символы: {set(other_chars)}")
                         if len(x_spamd_bar) <= 50:
-                            print(f"         - Символы: {list(x_spamd_bar)}")
-                            print(f"         - Коды символов: {[ord(c) for c in x_spamd_bar]}")
+                            print(f"         - Символы после нормализации: {list(x_spamd_bar)}")
+                            if original_bar and len(original_bar) <= 50:
+                                print(f"         - Коды символов исходного: {[ord(c) for c in original_bar]}")
                         print(f"         - Статистика: {plus_count} плюсов, {minus_count} минусов")
+                    else:
+                        print(f"         - ⚠️ Заголовок X-Spamd-Bar не найден!")
                     
                     # Если не нашли или получили 0, пробуем X-Spam-Level
                     if not x_spamd_bar and x_spam_level:
