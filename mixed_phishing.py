@@ -1588,8 +1588,8 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                                 line_stripped = line.strip()
                                 line_lower = line_stripped.lower()
                                 
-                                # Ищем заголовок X-Spamd-Bar (может быть с пробелами или без пробела после двоеточия)
-                                if 'x-spamd-bar' in line_lower:
+                                # Ищем заголовок X-Spamd-Bar (должен содержать двоеточие)
+                                if 'x-spamd-bar' in line_lower and ':' in line_stripped:
                                     # Начало заголовка - ищем двоеточие
                                     colon_idx = line_stripped.find(':')
                                     if colon_idx >= 0:
@@ -1603,17 +1603,22 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                                 elif in_x_spamd_bar:
                                     # Проверяем, является ли это продолжением многострочного заголовка
                                     if line.startswith(' ') or line.startswith('\t'):
-                                        # Продолжение многострочного заголовка
-                                        x_spamd_bar_parts.append(line_stripped)
+                                        # Продолжение многострочного заголовка - берем как есть, но убираем начальные пробелы/табы
+                                        continuation = line.lstrip(' \t')
+                                        if continuation:
+                                            x_spamd_bar_parts.append(continuation)
                                     else:
                                         # Конец заголовка (начался новый заголовок)
                                         break
                             
                             if x_spamd_bar_parts:
-                                # Объединяем все части заголовка
+                                # Объединяем все части заголовка БЕЗ пробелов между ними
+                                # Это важно, так как заголовок может быть разбит на несколько строк
                                 x_spamd_bar = ''.join(x_spamd_bar_parts).strip()
                                 parse_method = "сырые данные"
                                 print(f"      ✅ X-Spamd-Bar получен из сырых данных: '{x_spamd_bar}' (частей: {len(x_spamd_bar_parts)})")
+                                if len(x_spamd_bar_parts) > 1:
+                                    print(f"         Части заголовка: {x_spamd_bar_parts}")
                     except Exception as e:
                         print(f"      DEBUG: Ошибка парсинга из сырых данных: {e}")
                         import traceback
@@ -1675,16 +1680,22 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                     # Нормализуем заголовок: оставляем ТОЛЬКО плюсы и минусы (убираем ВСЕ остальные символы)
                     original_bar = x_spamd_bar if x_spamd_bar else ''
                     if x_spamd_bar:
+                        # Сохраняем исходное значение для диагностики
+                        before_normalization = x_spamd_bar
                         # Оставляем только символы + и - из заголовка (убираем пробелы, табуляции и все остальное)
                         # Это критично, так как заголовок может содержать пробелы между плюсами
                         normalized_bar = ''.join(c for c in x_spamd_bar if c in '+-')
                         if normalized_bar != x_spamd_bar:
                             print(f"      🔧 Нормализация: '{x_spamd_bar}' → '{normalized_bar}'")
-                            print(f"         (удалены символы: {set(x_spamd_bar) - set('+-')})")
+                            removed_chars = set(x_spamd_bar) - set('+-')
+                            if removed_chars:
+                                print(f"         (удалены символы: {removed_chars})")
                             x_spamd_bar = normalized_bar
                         # Дополнительная проверка: если после нормализации пусто, значит были только пробелы/другие символы
                         if not x_spamd_bar and original_bar:
                             print(f"      ⚠️ После нормализации заголовок стал пустым! Исходное: '{original_bar}'")
+                            print(f"         Все символы исходного: {[c for c in original_bar]}")
+                            print(f"         Коды символов: {[ord(c) for c in original_bar]}")
                     
                     # Подсчитываем количество '+' в X-Spamd-Bar (только плюсы, минусы не считаем)
                     spamd_bar_plus_count = x_spamd_bar.count('+') if x_spamd_bar else 0
@@ -1695,7 +1706,9 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                         print(f"         Исходный: '{original_bar}' (длина: {len(original_bar)})")
                         print(f"         Нормализованный: '{x_spamd_bar}' (длина: {len(x_spamd_bar)})")
                         print(f"         Все символы исходного: {[c for c in original_bar]}")
-                        print(f"         Коды символов: {[ord(c) for c in original_bar]}")
+                        print(f"         Коды символов исходного: {[ord(c) for c in original_bar]}")
+                        print(f"         Все символы нормализованного: {[c for c in x_spamd_bar]}")
+                        print(f"         Коды символов нормализованного: {[ord(c) for c in x_spamd_bar]}")
                     
                     # Отладочный вывод для диагностики парсинга
                     print(f"      🔍 ПАРСИНГ X-Spamd-Bar:")
