@@ -1871,7 +1871,7 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                     # Если результат = 10 и это malicious письмо, умножаем еще на 10
                     if plus_count_threshold_calc == 10 and is_malicious:
                         plus_count_threshold_calc = 100
-                    if user_spam_threshold > plus_count_threshold_calc:
+                    if user_spam_threshold > plus_count_threshold_calc+10:
                         print(f"   ✅ РЕШЕНИЕ: spam_enabled=1 и spam_threshold ({user_spam_threshold}) > (количество '+' ({spamd_bar_plus_count}) * 10 = {plus_count_threshold_calc}) → СОХРАНЯЕМ")
                         info["reason"] = f"spam_threshold_ok: {user_spam_threshold} > {plus_count_threshold_calc}"
                         return (False, info)
@@ -3267,7 +3267,7 @@ def mixed_phishing_attack():
     print("=" * 50)
     print(f"🎯 Цель: {target_email}")
     print(f"⏰ Интервал: каждые 5 секунд")
-    print(f"📊 Соотношение: 50% легитимных, 50% вредоносных")
+    print(f"📊 Соотношение: только вредоносные письма")
     print(f"🛑 Для остановки нажмите Ctrl+C")
     print("=" * 50)
     
@@ -3276,13 +3276,9 @@ def mixed_phishing_attack():
     
     while True:
         try:
-            # 50% вероятность легитимного письма, 50% вредоносного
-            if random.random() < 0.5:
-                if send_legitimate_email():
-                    legitimate_count += 1
-            else:
-                if send_malicious_email():
-                    malicious_count += 1
+            # Отправляем только вредоносные письма
+            if send_malicious_email():
+                malicious_count += 1
             
             print(f"⏳ Ожидание 5 секунд до следующей отправки...")
             for i in range(5, 0, -1):
