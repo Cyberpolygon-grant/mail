@@ -1517,146 +1517,192 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
         # Проверяем последние письма, начиная с самого нового
         for email_id in reversed(email_ids[-5:]):
             try:
+                # ВАЖНО: Сбрасываем все переменные для каждого письма
+                x_spam = ''
+                x_spam_level = ''
+                x_spamd_bar = ''
+                spamd_bar_plus_count = 0
+                match = False
+                msg_msgid = ''
+                msg_subject = ''
+                
                 # Получаем письмо
                 status, msg_data = mail.fetch(email_id, '(RFC822)')
                 if status != 'OK':
                     continue
                 
-                # Парсим письмо
+                # ПАРСИМ ТОЛЬКО ИЗ СЫРЫХ ДАННЫХ - никаких fallback!
                 raw_email = msg_data[0][1]
-                email_message = email.message_from_bytes(raw_email)
                 
-                # Проверяем совпадение по Message-ID или теме
-                match = False
+                # Декодируем сырые данные
+                raw_str = None
+                try:
+                    for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
+                        try:
+                            raw_str = raw_email.decode(encoding, errors='ignore')
+                            break
+                        except:
+                            continue
+                except:
+                    pass
                 
-                if msgid_clean:
-                    msg_msgid = (email_message.get('Message-ID', '') or '').strip().strip('<>')
-                    if msg_msgid == msgid_clean:
+                if not raw_str:
+                    continue
+                
+                # Парсим ВСЕ заголовки из сырых данных (включая Message-ID и Subject для проверки совпадения)
+                lines = raw_str.split('\n')
+                x_spam_parts = []
+                x_spam_level_parts = []
+                x_spamd_bar_parts = []
+                message_id_parts = []
+                subject_parts = []
+                in_x_spam = False
+                in_x_spam_level = False
+                in_x_spamd_bar = False
+                in_message_id = False
+                in_subject = False
+                headers_end = False
+                
+                for line in lines:
+                    # Проверяем конец заголовков
+                    if not line.strip():
+                        if in_x_spam or in_x_spam_level or in_x_spamd_bar or in_message_id or in_subject:
+                            in_x_spam = False
+                            in_x_spam_level = False
+                            in_x_spamd_bar = False
+                            in_message_id = False
+                            in_subject = False
+                        else:
+                            headers_end = True
+                        continue
+                    
+                    if headers_end:
+                        break
+                    
+                    line_stripped = line.strip()
+                    line_lower = line_stripped.lower()
+                    
+                    # Message-ID (для проверки совпадения)
+                    if 'message-id' in line_lower and ':' in line_stripped:
+                        colon_idx = line_stripped.find(':')
+                        if colon_idx >= 0:
+                            value = line_stripped[colon_idx + 1:].strip()
+                            if value:
+                                message_id_parts.append(value)
+                            in_message_id = True
+                            in_subject = False
+                            in_x_spam = False
+                            in_x_spam_level = False
+                            in_x_spamd_bar = False
+                    # Subject (для проверки совпадения)
+                    elif 'subject' in line_lower and ':' in line_stripped:
+                        colon_idx = line_stripped.find(':')
+                        if colon_idx >= 0:
+                            value = line_stripped[colon_idx + 1:].strip()
+                            if value:
+                                subject_parts.append(value)
+                            in_subject = True
+                            in_message_id = False
+                            in_x_spam = False
+                            in_x_spam_level = False
+                            in_x_spamd_bar = False
+                    # X-Spam
+                    elif line_lower.startswith('x-spam:'):
+                        colon_idx = line_stripped.find(':')
+                        if colon_idx >= 0:
+                            value = line_stripped[colon_idx + 1:].strip()
+                            if value:
+                                x_spam_parts.append(value)
+                            in_x_spam = True
+                            in_x_spam_level = False
+                            in_x_spamd_bar = False
+                            in_message_id = False
+                            in_subject = False
+                    # X-Spam-Level
+                    elif 'x-spam-level' in line_lower and ':' in line_stripped:
+                        colon_idx = line_stripped.find(':')
+                        if colon_idx >= 0:
+                            value = line_stripped[colon_idx + 1:].strip()
+                            if value:
+                                x_spam_level_parts.append(value)
+                            in_x_spam_level = True
+                            in_x_spam = False
+                            in_x_spamd_bar = False
+                            in_message_id = False
+                            in_subject = False
+                    # X-Spamd-Bar - ВАЖНО: парсим ТОЧНО из сырых данных
+                    elif 'x-spamd-bar' in line_lower and ':' in line_stripped:
+                        colon_idx = line_stripped.find(':')
+                        if colon_idx >= 0:
+                            # Берем ВСЕ после двоеточия
+                            value = line_stripped[colon_idx + 1:]
+                            # Убираем только начальные/конечные пробелы
+                            value = value.strip()
+                            if value:
+                                x_spamd_bar_parts.append(value)
+                            in_x_spamd_bar = True
+                            in_x_spam = False
+                            in_x_spam_level = False
+                            in_message_id = False
+                            in_subject = False
+                    # Продолжение многострочного заголовка
+                    elif in_x_spam or in_x_spam_level or in_x_spamd_bar or in_message_id or in_subject:
+                        if line.startswith(' ') or line.startswith('\t'):
+                            continuation = line.lstrip(' \t')
+                            if continuation:
+                                if in_x_spam:
+                                    x_spam_parts.append(continuation)
+                                elif in_x_spam_level:
+                                    x_spam_level_parts.append(continuation)
+                                elif in_x_spamd_bar:
+                                    x_spamd_bar_parts.append(continuation)
+                                elif in_message_id:
+                                    message_id_parts.append(continuation)
+                                elif in_subject:
+                                    subject_parts.append(continuation)
+                        else:
+                            in_x_spam = False
+                            in_x_spam_level = False
+                            in_x_spamd_bar = False
+                            in_message_id = False
+                            in_subject = False
+                
+                # Объединяем части заголовков
+                if x_spam_parts:
+                    x_spam = ''.join(x_spam_parts).strip()
+                
+                if x_spam_level_parts:
+                    x_spam_level = ''.join(x_spam_level_parts).strip()
+                
+                if x_spamd_bar_parts:
+                    # Объединяем все части заголовка БЕЗ пробелов между ними
+                    x_spamd_bar_raw = ''.join(x_spamd_bar_parts)
+                    # Убираем ВСЕ символы кроме + и -
+                    x_spamd_bar = ''.join(c for c in x_spamd_bar_raw if c in '+-')
+                    # Подсчитываем количество '+' знаков
+                    spamd_bar_plus_count = x_spamd_bar.count('+')
+                
+                # Проверяем совпадение по Message-ID или теме (тоже из сырых данных!)
+                if message_id_parts:
+                    msg_msgid = ''.join(message_id_parts).strip().strip('<>')
+                    if msgid_clean and msg_msgid == msgid_clean:
                         match = True
                 
-                if not match and subject:
+                if not match and subject_parts:
                     try:
-                        msg_subject = decode_mime_words(email_message.get('Subject', '')).lower()
-                        if subject_lower[:50] in msg_subject or msg_subject[:50] in subject_lower:
+                        msg_subject_raw = ''.join(subject_parts).strip()
+                        msg_subject = decode_mime_words(msg_subject_raw).lower()
+                        if subject and subject_lower[:50] in msg_subject or msg_subject[:50] in subject_lower:
                             match = True
                     except:
                         pass
                 
                 # Если нашли совпадение ИЛИ это самое последнее письмо - проверяем заголовки
                 if match or (email_id == email_ids[-1]):
-                    # ПАРСИМ ТОЛЬКО ИЗ СЫРЫХ ДАННЫХ - никаких fallback!
-                    x_spam = ''
-                    x_spam_level = ''
-                    x_spamd_bar = ''
-                    spamd_bar_plus_count = 0
-                    
-                    # Декодируем сырые данные
-                    raw_str = None
-                    try:
-                        for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
-                            try:
-                                raw_str = raw_email.decode(encoding, errors='ignore')
-                                break
-                            except:
-                                continue
-                    except:
-                        pass
-                    
-                    if raw_str:
-                        # Парсим заголовки из сырых данных
-                        lines = raw_str.split('\n')
-                        x_spam_parts = []
-                        x_spam_level_parts = []
-                        x_spamd_bar_parts = []
-                        in_x_spam = False
-                        in_x_spam_level = False
-                        in_x_spamd_bar = False
-                        headers_end = False
-                        
-                        for line in lines:
-                            # Проверяем конец заголовков
-                            if not line.strip():
-                                if in_x_spam or in_x_spam_level or in_x_spamd_bar:
-                                    in_x_spam = False
-                                    in_x_spam_level = False
-                                    in_x_spamd_bar = False
-                                else:
-                                    headers_end = True
-                                continue
-                            
-                            if headers_end:
-                                break
-                            
-                            line_stripped = line.strip()
-                            line_lower = line_stripped.lower()
-                            
-                            # X-Spam
-                            if line_lower.startswith('x-spam:'):
-                                colon_idx = line_stripped.find(':')
-                                if colon_idx >= 0:
-                                    value = line_stripped[colon_idx + 1:].strip()
-                                    if value:
-                                        x_spam_parts.append(value)
-                                    in_x_spam = True
-                                    in_x_spam_level = False
-                                    in_x_spamd_bar = False
-                            # X-Spam-Level
-                            elif 'x-spam-level' in line_lower and ':' in line_stripped:
-                                colon_idx = line_stripped.find(':')
-                                if colon_idx >= 0:
-                                    value = line_stripped[colon_idx + 1:].strip()
-                                    if value:
-                                        x_spam_level_parts.append(value)
-                                    in_x_spam_level = True
-                                    in_x_spam = False
-                                    in_x_spamd_bar = False
-                            # X-Spamd-Bar - ВАЖНО: парсим ТОЧНО из сырых данных
-                            elif 'x-spamd-bar' in line_lower and ':' in line_stripped:
-                                colon_idx = line_stripped.find(':')
-                                if colon_idx >= 0:
-                                    # Берем ВСЕ после двоеточия, включая пробелы
-                                    value = line_stripped[colon_idx + 1:]
-                                    # Убираем только начальные/конечные пробелы, но сохраняем содержимое
-                                    value = value.strip()
-                                    if value:
-                                        x_spamd_bar_parts.append(value)
-                                    in_x_spamd_bar = True
-                                    in_x_spam = False
-                                    in_x_spam_level = False
-                            # Продолжение многострочного заголовка
-                            elif in_x_spam or in_x_spam_level or in_x_spamd_bar:
-                                if line.startswith(' ') or line.startswith('\t'):
-                                    continuation = line.lstrip(' \t')
-                                    if continuation:
-                                        if in_x_spam:
-                                            x_spam_parts.append(continuation)
-                                        elif in_x_spam_level:
-                                            x_spam_level_parts.append(continuation)
-                                        elif in_x_spamd_bar:
-                                            x_spamd_bar_parts.append(continuation)
-                                else:
-                                    in_x_spam = False
-                                    in_x_spam_level = False
-                                    in_x_spamd_bar = False
-                        
-                        # Объединяем части заголовков
-                        if x_spam_parts:
-                            x_spam = ''.join(x_spam_parts).strip()
-                        
-                        if x_spam_level_parts:
-                            x_spam_level = ''.join(x_spam_level_parts).strip()
-                        
-                        if x_spamd_bar_parts:
-                            # Объединяем все части заголовка БЕЗ пробелов между ними
-                            x_spamd_bar_raw = ''.join(x_spamd_bar_parts)
-                            # Убираем ВСЕ символы кроме + и -
-                            x_spamd_bar = ''.join(c for c in x_spamd_bar_raw if c in '+-')
-                            # Подсчитываем количество '+' знаков
-                            spamd_bar_plus_count = x_spamd_bar.count('+')
-                            
-                            print(f"      ✅ X-Spamd-Bar из сырых данных: '{x_spamd_bar_raw}' → нормализовано: '{x_spamd_bar}' → {spamd_bar_plus_count} плюсов")
-                        else:
-                            print(f"      ⚠️ X-Spamd-Bar не найден в сырых данных")
+                    if x_spamd_bar_parts:
+                        print(f"      ✅ X-Spamd-Bar из сырых данных: '{x_spamd_bar_raw}' → нормализовано: '{x_spamd_bar}' → {spamd_bar_plus_count} плюсов")
+                    else:
+                        print(f"      ⚠️ X-Spamd-Bar не найден в сырых данных")
                     
                     # Получаем настройки спам-фильтра пользователя из базы данных
                     user_spam_settings = get_user_spam_threshold(target_email)
