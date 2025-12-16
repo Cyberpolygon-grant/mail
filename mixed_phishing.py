@@ -1506,9 +1506,10 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
         # Получаем список ID писем
         email_ids = messages[0].split()
         if not email_ids:
-            print(f"   ⚠️  Нет писем в INBOX")
+            print(f"   🚫 Нет писем в INBOX")
+            print(f"   🚫 РЕШЕНИЕ: Нет писем в INBOX → НЕ СОХРАНЯЕМ для автоматизации оператора")
             info["reason"] = "no_emails_in_inbox"
-            return (False, info)  # При отсутствии писем сохраняем (fail-open)
+            return (True, info)  # При отсутствии писем НЕ сохраняем
         
         # Берем последние письма (до 20 самых новых для надежности)
         subject_lower = (subject or "").lower()
@@ -1895,11 +1896,12 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
             info["reason"] = "x_spam_no_or_missing"
             return (False, info)
         
-        # Если не нашли письмо после всех попыток
-        print(f"   ⚠️  Письмо не найдено в INBOX после {max_search_attempts} попыток поиска")
+        # Если не нашли письмо после всех попыток - НЕ СОХРАНЯЕМ
+        print(f"   🚫 Письмо не найдено в INBOX после {max_search_attempts} попыток поиска")
         print(f"      Message-ID: {msgid_clean[:50] if msgid_clean else 'N/A'}")
         print(f"      Subject: {subject[:50] if subject else 'N/A'}")
         print(f"      Всего писем в INBOX: {len(email_ids)}")
+        print(f"   🚫 РЕШЕНИЕ: Письмо не найдено → НЕ СОХРАНЯЕМ для автоматизации оператора")
         
         # Логируем уровень спама пользователя даже если письмо не найдено
         output_dir = Path(os.getenv('ATTACHMENTS_OUTPUT_DIR', '/app/sent_attachments'))
@@ -1913,7 +1915,7 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
         info["reason"] = f"email_not_found_in_imap_after_{max_search_attempts}_attempts"
         info["user_spam_threshold"] = user_spam_threshold
         info["user_spam_enabled"] = user_spam_enabled
-        return (False, info)  # При отсутствии письма сохраняем (fail-open)
+        return (True, info)  # При отсутствии письма НЕ сохраняем (fail-close)
         
     except Exception as e:
         error_msg = str(e)
