@@ -30,8 +30,8 @@ build_and_start() {
     echo "📦 Запуск сервисов..."
     docker-compose --profile phishing up -d
     echo "✅ Система запущена"
-    echo "🌐 Веб-почта: http://financepro.ru/webmail/"
-    echo "🔧 Админка: http://financepro.ru/admin/"
+    echo "🌐 Веб-почта: http://mail.financepro.ru/webmail/"
+    echo "🔧 Админка: http://mail.financepro.ru/admin/"
     
     # Ждем, пока сервисы запустятся
     echo ""
