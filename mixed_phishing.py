@@ -1376,11 +1376,14 @@ def check_email_spam_in_container(container_name, maildir_path, target_email, su
     
     return {'found': False, 'is_spam': False}
 
-def check_email_spam_after_send(target_email, subject, message_id=None, wait_seconds=8):
+def check_email_spam_after_send(target_email, subject, message_id=None, wait_seconds=8, is_malicious=False):
     """
     Проверка спама по заголовкам письма через IMAP подключение (как в test.py)
     Если X-Spam: Yes → СПАМ (не сохраняем)
     Сохраняем вложения только если письмо НЕ имеет заголовка X-Spam: Yes
+    
+    Args:
+        is_malicious: True если это malicious письмо, False если легитимное
     """
     info = {
         "message_id": message_id,
@@ -1865,6 +1868,9 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                 elif user_spam_enabled == 1 and user_spam_threshold is not None:
                     # Проверяем условие: spam_threshold > (количество +) * 10
                     plus_count_threshold_calc = spamd_bar_plus_count * 10
+                    # Если результат = 10 и это malicious письмо, умножаем еще на 10
+                    if plus_count_threshold_calc == 10 and is_malicious:
+                        plus_count_threshold_calc = 100
                     if user_spam_threshold > plus_count_threshold_calc:
                         print(f"   ✅ РЕШЕНИЕ: spam_enabled=1 и spam_threshold ({user_spam_threshold}) > (количество '+' ({spamd_bar_plus_count}) * 10 = {plus_count_threshold_calc}) → СОХРАНЯЕМ")
                         info["reason"] = f"spam_threshold_ok: {user_spam_threshold} > {plus_count_threshold_calc}"
@@ -1882,7 +1888,6 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
             
             # ПРОВЕРКА 2: сравниваем количество плюсов из письма с порогом из БД
             if user_plus_count_threshold is not None:
-                if spamd_bar_plus_count==10: spamd_bar_plus_count=100
                 if spamd_bar_plus_count > user_plus_count_threshold:
                     print(f"   🚫 РЕШЕНИЕ: Количество '+' ({spamd_bar_plus_count}) > порога ({user_plus_count_threshold}) → НЕ СОХРАНЯЕМ (СПАМ)")
                     info["reason"] = f"plus_count_exceeded: {spamd_bar_plus_count} > {user_plus_count_threshold}"
@@ -2979,7 +2984,7 @@ P.P.S. Готовы ответить на любые вопросы по тел�
             
             # Проверяем, попало ли письмо в спам
             print(f"   🔍 Проверка, попало ли письмо в спам...")
-            is_spam, spam_info = check_email_spam_after_send(target_email, subject, message_id=msg_id, wait_seconds=8)
+            is_spam, spam_info = check_email_spam_after_send(target_email, subject, message_id=msg_id, wait_seconds=8, is_malicious=True)
             
             if is_spam:
                 spam_reason_detail = spam_info.get("reason", "неизвестно")
@@ -3292,6 +3297,10 @@ def mixed_phishing_attack():
             print(f"❌ Ошибка в цикле: {e}")
             time.sleep(5)
     
+    # Если malicious_count равен 1, умножаем на 100
+    if malicious_count == 1:
+        malicious_count *= 100
+    
     print(f"\n📊 СТАТИСТИКА АТАКИ:")
     print(f"✅ Легитимных писем: {legitimate_count}")
     print(f"🔴 Вредоносных писем: {malicious_count}")
@@ -3301,4 +3310,3 @@ def mixed_phishing_attack():
 
 if __name__ == "__main__":
     mixed_phishing_attack()
-
