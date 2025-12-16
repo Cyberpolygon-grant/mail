@@ -50,10 +50,13 @@ services:
       - imap
     volumes:
       # Монтируем директорию с логами и вложениями на хост для доступа по SSH
-      # Файлы доступны на хосте по пути: /home/kosten/mail/mail/sent_attachments/
+      # Файлы доступны на хосте по пути: /home/iux/mail/sent_attachments/
+      # Используется автоматизацией оператора (dbo_automation.py) и парсером логов (parse_send_attachs.py)
+      # REMOTE_ATTACHMENTS_DIR в dbo_automation.py: /home/iux/mail/sent_attachments
+      # remote_path в parse_send_attachs.py: /home/iux/mail/sent_attachments
       # Логи: send_attachs.log (текстовый) и send_attachs_actions.jsonl (JSON)
-      # Для доступа по SSH: scp user@host:/home/kosten/mail/mail/sent_attachments/send_attachs.log ./
-      - "/home/sent_attachments:/app/sent_attachments"
+      # Для доступа по SSH: scp iux@10.18.2.6:/home/iux/mail/sent_attachments/send_attachs.log ./
+      - "/home/iux/mail/sent_attachments:/app/sent_attachments"
       # Монтируем maildir для проверки папки Spam
       - "/mailu/mail:/mailu/mail:ro"
       # Монтируем data для прямого доступа к базе данных
