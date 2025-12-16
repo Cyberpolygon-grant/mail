@@ -666,8 +666,15 @@ def get_filename_by_subject(subject, company_name, file_type="pdf", attachment_i
         ]
     }
     
+    # Удаляем суффиксы из темы для поиска в маппинге (например, "- требуется срочно", "- просим ускорить")
+    subject_clean = subject
+    for suffix in [" - требуется срочно", " - просим ускорить", " - требуется помощь", " - важно для безопасности"]:
+        if subject_clean.endswith(suffix):
+            subject_clean = subject_clean[:-len(suffix)].strip()
+            break
+    
     # Получаем список возможных имен файлов по теме
-    filenames = subject_to_filenames.get(subject)
+    filenames = subject_to_filenames.get(subject_clean)
     if filenames:
         # Выбираем имя файла по индексу (с циклическим перебором)
         filename = filenames[attachment_index % len(filenames)]
@@ -774,8 +781,21 @@ def create_file_attachment(file_type, company_name, is_malicious=False, subject=
         if file_content is None:
             print("FALLBACK: Генерируем вредоносный Excel файл, т.к. папка malicious_attachments пуста")
             file_content = create_malicious_excel(company_name)
-            company_clean = company_name.replace(" ", "_").replace("ООО", "").replace("АО", "").strip()
-            original_filename = f"Регистрационная_форма_{company_clean}.xlsm"
+            # Генерируем реалистичное имя файла на основе subject или используем стандартное
+            if subject:
+                # Определяем расширение по умолчанию для вредоносных файлов
+                file_ext = ".xlsm"
+                original_filename = get_filename_by_subject(subject, company_name, "excel", attachment_index, file_ext)
+            else:
+                company_clean = company_name.replace(" ", "_").replace("ООО", "").replace("АО", "").strip()
+                original_filename = f"Регистрационная_форма_{company_clean}.xlsm"
+        else:
+            # Если файл взят из папки, но subject передан - переименовываем в реалистичное имя
+            if subject:
+                # Определяем расширение из оригинального файла
+                file_ext = os.path.splitext(original_filename)[1] or ".xlsm"
+                # Генерируем новое реалистичное имя на основе темы
+                original_filename = get_filename_by_subject(subject, company_name, "excel", attachment_index, file_ext)
         
         # Определяем MIME тип по расширению
         if original_filename.endswith('.zip'):
