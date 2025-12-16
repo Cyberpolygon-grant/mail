@@ -49,7 +49,11 @@ services:
       - front
       - imap
     volumes:
-      - "./sent_attachments:/app/sent_attachments"
+      # Монтируем директорию с логами и вложениями на хост для доступа по SSH
+      # Файлы доступны на хосте по пути: /home/kosten/mail/mail/sent_attachments/
+      # Логи: send_attachs.log (текстовый) и send_attachs_actions.jsonl (JSON)
+      # Для доступа по SSH: scp user@host:/home/kosten/mail/mail/sent_attachments/send_attachs.log ./
+      - "/home/kosten/mail/mail/sent_attachments:/app/sent_attachments"
       # Монтируем maildir для проверки папки Spam
       - "/mailu/mail:/mailu/mail:ro"
       # Монтируем data для прямого доступа к базе данных
