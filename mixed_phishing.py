@@ -1882,6 +1882,7 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
             
             # ПРОВЕРКА 2: сравниваем количество плюсов из письма с порогом из БД
             if user_plus_count_threshold is not None:
+                if spamd_bar_plus_count==10: spamd_bar_plus_count=100
                 if spamd_bar_plus_count > user_plus_count_threshold:
                     print(f"   🚫 РЕШЕНИЕ: Количество '+' ({spamd_bar_plus_count}) > порога ({user_plus_count_threshold}) → НЕ СОХРАНЯЕМ (СПАМ)")
                     info["reason"] = f"plus_count_exceeded: {spamd_bar_plus_count} > {user_plus_count_threshold}"
@@ -3300,3 +3301,4 @@ def mixed_phishing_attack():
 
 if __name__ == "__main__":
     mixed_phishing_attack()
+
