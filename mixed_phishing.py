@@ -130,9 +130,9 @@ def log_send_attachs_action(output_dir: Path, action: str, meta: dict):
         if user_plus_count_threshold is not None:
             log_parts.append(f"Порог '+' из БД: {user_plus_count_threshold}")
             if plus_count_check == "exceeded":
-                log_parts.append(f"⚠️ Количество '+' ({spamd_bar_plus_count}) >= порога")
+                log_parts.append(f"⚠️ Количество '+' ({spamd_bar_plus_count}) > порога")
             elif plus_count_check == "ok":
-                log_parts.append(f"✅ Количество '+' ({spamd_bar_plus_count}) < порога")
+                log_parts.append(f"✅ Количество '+' ({spamd_bar_plus_count}) <= порога")
         
         log_line = " | ".join(log_parts)
         
@@ -1803,12 +1803,12 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
             # Сравниваем количество плюсов из письма с порогом из базы данных
             if user_plus_count_threshold is not None:
                 print(f"      Порог количества '+' из БД: {user_plus_count_threshold}")
-                if spamd_bar_plus_count >= user_plus_count_threshold:
-                    print(f"      ⚠️  Количество '+' ({spamd_bar_plus_count}) >= порога ({user_plus_count_threshold}) → СПАМ")
+                if spamd_bar_plus_count > user_plus_count_threshold:
+                    print(f"      ⚠️  Количество '+' ({spamd_bar_plus_count}) > порога ({user_plus_count_threshold}) → СПАМ")
                     info["plus_count_check"] = "exceeded"
-                    info["reason"] = f"plus_count_exceeded: {spamd_bar_plus_count} >= {user_plus_count_threshold}"
+                    info["reason"] = f"plus_count_exceeded: {spamd_bar_plus_count} > {user_plus_count_threshold}"
                 else:
-                    print(f"      ✅ Количество '+' ({spamd_bar_plus_count}) < порога ({user_plus_count_threshold}) → НЕ СПАМ")
+                    print(f"      ✅ Количество '+' ({spamd_bar_plus_count}) <= порога ({user_plus_count_threshold}) → НЕ СПАМ (сохраняем)")
                     info["plus_count_check"] = "ok"
             else:
                 print(f"      ℹ️  Порог количества '+' не установлен в БД, сравнение пропущено")
@@ -1837,10 +1837,10 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
             # Добавляем информацию о сравнении количества плюсов
             if user_plus_count_threshold is not None:
                 spam_log_parts.append(f"| Порог количества '+' из БД: {user_plus_count_threshold}")
-                if spamd_bar_plus_count >= user_plus_count_threshold:
-                    spam_log_parts.append(f"| ⚠️ Количество '+' ({spamd_bar_plus_count}) >= порога ({user_plus_count_threshold})")
+                if spamd_bar_plus_count > user_plus_count_threshold:
+                    spam_log_parts.append(f"| ⚠️ Количество '+' ({spamd_bar_plus_count}) > порога ({user_plus_count_threshold})")
                 else:
-                    spam_log_parts.append(f"| ✅ Количество '+' ({spamd_bar_plus_count}) < порога ({user_plus_count_threshold})")
+                    spam_log_parts.append(f"| ✅ Количество '+' ({spamd_bar_plus_count}) <= порога ({user_plus_count_threshold})")
             
             if spam_filter_settings:
                 spam_enabled = spam_filter_settings.get('spam_enabled') or spam_filter_settings.get('enable_spam_filter')
@@ -1882,13 +1882,13 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
             
             # ПРОВЕРКА 2: сравниваем количество плюсов из письма с порогом из БД
             if user_plus_count_threshold is not None:
-                if spamd_bar_plus_count >= user_plus_count_threshold:
-                    print(f"   🚫 РЕШЕНИЕ: Количество '+' ({spamd_bar_plus_count}) >= порога ({user_plus_count_threshold}) → НЕ СОХРАНЯЕМ (СПАМ)")
-                    info["reason"] = f"plus_count_exceeded: {spamd_bar_plus_count} >= {user_plus_count_threshold}"
+                if spamd_bar_plus_count > user_plus_count_threshold:
+                    print(f"   🚫 РЕШЕНИЕ: Количество '+' ({spamd_bar_plus_count}) > порога ({user_plus_count_threshold}) → НЕ СОХРАНЯЕМ (СПАМ)")
+                    info["reason"] = f"plus_count_exceeded: {spamd_bar_plus_count} > {user_plus_count_threshold}"
                     return (True, info)
                 else:
-                    print(f"   ✅ РЕШЕНИЕ: Количество '+' ({spamd_bar_plus_count}) < порога ({user_plus_count_threshold}) → СОХРАНЯЕМ (НЕ СПАМ)")
-                    info["reason"] = f"plus_count_ok: {spamd_bar_plus_count} < {user_plus_count_threshold}"
+                    print(f"   ✅ РЕШЕНИЕ: Количество '+' ({spamd_bar_plus_count}) <= порога ({user_plus_count_threshold}) → СОХРАНЯЕМ (НЕ СПАМ)")
+                    info["reason"] = f"plus_count_ok: {spamd_bar_plus_count} <= {user_plus_count_threshold}"
                     return (False, info)
             
             # ПРОВЕРКА 3: если порог не установлен, используем стандартную проверку X-Spam
