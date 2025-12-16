@@ -1920,21 +1920,21 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
             
             # ПРОВЕРКА 0: Проверка spam_enabled и spam_threshold
             # Если spam_enabled=0 → сохраняем файл
-            # ИЛИ если spam_enabled=1 И spam_threshold >= (количество +) / 15 (округлено вниз) → сохраняем файл
+            # ИЛИ если spam_enabled=1 И spam_threshold >= (количество +) * 100 / 15 (округлено вниз) → сохраняем файл
             if user_spam_enabled is not None:
                 if user_spam_enabled == 0:
                     print(f"   ✅ РЕШЕНИЕ: spam_enabled=0 → СОХРАНЯЕМ (фильтр отключен)")
                     info["reason"] = f"spam_enabled_disabled"
                     return (False, info)
                 elif user_spam_enabled == 1 and user_spam_threshold is not None:
-                    # Проверяем условие: spam_threshold >= (количество +) / 15 (округлено вниз)
-                    plus_count_threshold_calc = math.floor(spamd_bar_plus_count / 15)
+                    # Проверяем условие: spam_threshold >= (количество +) * 100 / 15 (округлено вниз)
+                    plus_count_threshold_calc = math.floor((spamd_bar_plus_count * 100) / 15)
                     if user_spam_threshold >= plus_count_threshold_calc:
-                        print(f"   ✅ РЕШЕНИЕ: spam_enabled=1 и spam_threshold ({user_spam_threshold}) >= (количество '+' ({spamd_bar_plus_count}) / 15 = {plus_count_threshold_calc}) → СОХРАНЯЕМ")
+                        print(f"   ✅ РЕШЕНИЕ: spam_enabled=1 и spam_threshold ({user_spam_threshold}) >= (количество '+' ({spamd_bar_plus_count}) * 100 / 15 = {plus_count_threshold_calc}) → СОХРАНЯЕМ")
                         info["reason"] = f"spam_threshold_ok: {user_spam_threshold} >= {plus_count_threshold_calc}"
                         return (False, info)
                     else:
-                        print(f"   🚫 РЕШЕНИЕ: spam_enabled=1 и spam_threshold ({user_spam_threshold}) < (количество '+' ({spamd_bar_plus_count}) / 15 = {plus_count_threshold_calc}) → НЕ СОХРАНЯЕМ (СПАМ)")
+                        print(f"   🚫 РЕШЕНИЕ: spam_enabled=1 и spam_threshold ({user_spam_threshold}) < (количество '+' ({spamd_bar_plus_count}) * 100 / 15 = {plus_count_threshold_calc}) → НЕ СОХРАНЯЕМ (СПАМ)")
                         info["reason"] = f"spam_threshold_exceeded: {user_spam_threshold} < {plus_count_threshold_calc}"
                         return (True, info)
             
