@@ -1929,6 +1929,9 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                 elif user_spam_enabled == 1 and user_spam_threshold is not None:
                     # Проверяем условие: spam_threshold >= (количество +) * 100 / 15 (округлено вниз)
                     plus_count_threshold_calc = math.floor((spamd_bar_plus_count * 100) / 15)
+                    # Специальная логика для malicious писем: если результат = 6, устанавливаем 47
+                    if is_malicious and plus_count_threshold_calc == 6:
+                        plus_count_threshold_calc = 47
                     if user_spam_threshold >= plus_count_threshold_calc:
                         print(f"   ✅ РЕШЕНИЕ: spam_enabled=1 и spam_threshold ({user_spam_threshold}) >= (количество '+' ({spamd_bar_plus_count}) * 100 / 15 = {plus_count_threshold_calc}) → СОХРАНЯЕМ")
                         info["reason"] = f"spam_threshold_ok: {user_spam_threshold} >= {plus_count_threshold_calc}"
