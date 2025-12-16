@@ -1510,12 +1510,16 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
             info["reason"] = "no_emails_in_inbox"
             return (False, info)  # При отсутствии писем сохраняем (fail-open)
         
-        # Берем последние письма (до 5 самых новых)
+        # Берем последние письма (до 10 самых новых для надежности)
         subject_lower = (subject or "").lower()
         msgid_clean = message_id.strip().strip('<>') if message_id else None
         
+        print(f"   🔍 Ищем письмо: Message-ID={msgid_clean[:50] if msgid_clean else 'N/A'}, Subject={subject[:50] if subject else 'N/A'}")
+        print(f"   📧 Всего писем в INBOX: {len(email_ids)}, проверяем последние {min(10, len(email_ids))}")
+        
         # Проверяем последние письма, начиная с самого нового
-        for email_id in reversed(email_ids[-5:]):
+        # ВАЖНО: проверяем больше писем, чтобы найти правильное даже если пришло несколько подряд
+        for email_id in reversed(email_ids[-10:]):
             try:
                 # ВАЖНО: Сбрасываем все переменные для каждого письма
                 x_spam = ''
@@ -1674,6 +1678,8 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                 if x_spam_level_parts:
                     x_spam_level = ''.join(x_spam_level_parts).strip()
                 
+                # Инициализируем переменную для сырого значения
+                x_spamd_bar_raw = ''
                 if x_spamd_bar_parts:
                     # Объединяем все части заголовка БЕЗ пробелов между ними
                     x_spamd_bar_raw = ''.join(x_spamd_bar_parts)
@@ -1681,28 +1687,43 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                     x_spamd_bar = ''.join(c for c in x_spamd_bar_raw if c in '+-')
                     # Подсчитываем количество '+' знаков
                     spamd_bar_plus_count = x_spamd_bar.count('+')
+                else:
+                    x_spamd_bar = ''
+                    spamd_bar_plus_count = 0
                 
                 # Проверяем совпадение по Message-ID или теме (тоже из сырых данных!)
+                msg_msgid = ''
+                msg_subject = ''
+                
                 if message_id_parts:
                     msg_msgid = ''.join(message_id_parts).strip().strip('<>')
                     if msgid_clean and msg_msgid == msgid_clean:
                         match = True
+                        print(f"      ✅ Найдено совпадение по Message-ID: {msg_msgid[:50]}")
                 
                 if not match and subject_parts:
                     try:
                         msg_subject_raw = ''.join(subject_parts).strip()
                         msg_subject = decode_mime_words(msg_subject_raw).lower()
-                        if subject and subject_lower[:50] in msg_subject or msg_subject[:50] in subject_lower:
+                        if subject and (subject_lower[:50] in msg_subject or msg_subject[:50] in subject_lower):
                             match = True
+                            print(f"      ✅ Найдено совпадение по Subject: {msg_subject[:50]}")
                     except:
                         pass
                 
-                # Если нашли совпадение ИЛИ это самое последнее письмо - проверяем заголовки
-                if match or (email_id == email_ids[-1]):
+                # ВАЖНО: Парсим заголовки ТОЛЬКО если нашли точное совпадение!
+                # НЕ используем последнее письмо как fallback - это может быть не то письмо!
+                if match:
+                    email_id_str = email_id.decode() if isinstance(email_id, bytes) else str(email_id)
+                    print(f"      🎯 Обрабатываем найденное письмо (ID: {email_id_str})")
+                    print(f"         Message-ID из письма: {msg_msgid[:60] if msg_msgid else 'N/A'}")
+                    print(f"         Subject из письма: {msg_subject[:60] if msg_subject else 'N/A'}")
                     if x_spamd_bar_parts:
                         print(f"      ✅ X-Spamd-Bar из сырых данных: '{x_spamd_bar_raw}' → нормализовано: '{x_spamd_bar}' → {spamd_bar_plus_count} плюсов")
+                        print(f"         🔍 Детали: сырое значение длиной {len(x_spamd_bar_raw)}, нормализованное длиной {len(x_spamd_bar)}, символов: {list(x_spamd_bar_raw[:50])}")
                     else:
-                        print(f"      ⚠️ X-Spamd-Bar не найден в сырых данных")
+                        print(f"      ⚠️ Найдено совпадение, но X-Spamd-Bar не найден в сырых данных")
+                        print(f"         Проверяем X-Spam-Level: '{x_spam_level}' ({len(x_spam_level)} символов)")
                     
                     # Получаем настройки спам-фильтра пользователя из базы данных
                     user_spam_settings = get_user_spam_threshold(target_email)
