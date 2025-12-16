@@ -1552,12 +1552,85 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                     spamd_bar_plus_count = 0
                     x_spamd_bar = ''
                     parse_method = None
+                    original_x_spam_level = x_spam_level
                     
                     # Сначала пытаемся получить X-Spam-Level и посчитать звездочки
+                    # Парсим из сырых данных для надежности
+                    if not x_spam_level or x_spam_level.count('*') == 0:
+                        # Пробуем получить из сырых данных
+                        try:
+                            raw_str = None
+                            for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
+                                try:
+                                    raw_str = raw_email.decode(encoding, errors='ignore')
+                                    break
+                                except:
+                                    continue
+                            
+                            if raw_str:
+                                lines = raw_str.split('\n')
+                                x_spam_level_parts = []
+                                in_x_spam_level = False
+                                headers_end = False
+                                
+                                for line in lines:
+                                    if not line.strip():
+                                        if in_x_spam_level:
+                                            break
+                                        headers_end = True
+                                        continue
+                                    
+                                    if headers_end:
+                                        break
+                                    
+                                    line_stripped = line.strip()
+                                    line_lower = line_stripped.lower()
+                                    
+                                    if 'x-spam-level' in line_lower and ':' in line_stripped:
+                                        colon_idx = line_stripped.find(':')
+                                        if colon_idx >= 0:
+                                            value = line_stripped[colon_idx + 1:].strip()
+                                            if value:
+                                                x_spam_level_parts.append(value)
+                                            in_x_spam_level = True
+                                    elif in_x_spam_level:
+                                        if line.startswith(' ') or line.startswith('\t'):
+                                            continuation = line.lstrip(' \t')
+                                            if continuation:
+                                                x_spam_level_parts.append(continuation)
+                                        else:
+                                            break
+                                
+                                if x_spam_level_parts:
+                                    x_spam_level = ''.join(x_spam_level_parts).strip()
+                                    print(f"      ✅ X-Spam-Level получен из сырых данных: '{x_spam_level}'")
+                        except Exception as e:
+                            print(f"      DEBUG: Ошибка парсинга X-Spam-Level из сырых данных: {e}")
+                    
+                    # Нормализуем X-Spam-Level: оставляем ТОЛЬКО звездочки
                     if x_spam_level:
-                        spamd_bar_plus_count = x_spam_level.count('*')
+                        original_level = x_spam_level
+                        # Оставляем только звездочки (убираем все остальные символы)
+                        normalized_level = ''.join(c for c in x_spam_level if c == '*')
+                        if normalized_level != x_spam_level:
+                            print(f"      🔧 Нормализация X-Spam-Level: '{x_spam_level}' → '{normalized_level}'")
+                            removed_chars = set(x_spam_level) - set('*')
+                            if removed_chars:
+                                print(f"         (удалены символы: {removed_chars})")
+                            x_spam_level = normalized_level
+                        
+                        # Считаем звездочки
+                        spamd_bar_plus_count = len(x_spam_level) if x_spam_level else 0
                         parse_method = "X-Spam-Level"
-                        print(f"      ✅ Используем X-Spam-Level: '{x_spam_level}' → {spamd_bar_plus_count} звездочек (*)")
+                        print(f"      ✅ Используем X-Spam-Level: '{original_level}' → нормализовано: '{x_spam_level}' → {spamd_bar_plus_count} звездочек (*)")
+                        
+                        # Диагностика если получили только 1 звездочку, но исходный заголовок длиннее
+                        if spamd_bar_plus_count == 1 and original_level and len(original_level) > 2:
+                            print(f"      ⚠️⚠️⚠️ ПОДОЗРИТЕЛЬНО: Найдена только 1 звездочка, но исходный заголовок длиннее!")
+                            print(f"         Исходный: '{original_level}' (длина: {len(original_level)})")
+                            print(f"         Нормализованный: '{x_spam_level}' (длина: {len(x_spam_level)})")
+                            print(f"         Все символы исходного: {[c for c in original_level]}")
+                            print(f"         Коды символов исходного: {[ord(c) for c in original_level]}")
                     
                     # Если X-Spam-Level пустой, пробуем X-Spamd-Bar как fallback
                     if not x_spam_level or spamd_bar_plus_count == 0:
@@ -1637,9 +1710,13 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                     
                     # Отладочный вывод
                     print(f"      🔍 ПАРСИНГ СПАМ-ЗАГОЛОВКОВ:")
-                    print(f"         - X-Spam-Level: '{x_spam_level}'")
+                    print(f"         - X-Spam-Level исходный: '{original_x_spam_level}'")
+                    print(f"         - X-Spam-Level нормализованный: '{x_spam_level}'")
                     print(f"         - Метод получения: {parse_method or 'не найден'}")
-                    print(f"         - ⭐ Количество знаков (звездочек/плюсов): {spamd_bar_plus_count}")
+                    print(f"         - ⭐ Количество звездочек (*): {spamd_bar_plus_count}")
+                    if x_spam_level:
+                        print(f"         - Символы нормализованного: {list(x_spam_level)}")
+                        print(f"         - Длина нормализованного: {len(x_spam_level)}")
                     
                     # Получаем настройки спам-фильтра пользователя из базы данных
                     # Кэш уже очищен в начале функции для актуальности данных
@@ -1652,9 +1729,17 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                     
                     # Сохраняем значения в info
                     info["x_spam_header"] = x_spam
-                    info["x_spam_level"] = x_spam_level
+                    info["x_spam_level"] = original_x_spam_level  # Сохраняем исходное значение
                     info["x_spamd_bar"] = x_spamd_bar if x_spamd_bar else x_spam_level  # Используем X-Spam-Level если X-Spamd-Bar пустой
                     info["spamd_bar_plus_count"] = spamd_bar_plus_count
+                    
+                    # Дополнительная диагностика
+                    if spamd_bar_plus_count == 0:
+                        print(f"      ⚠️ ВНИМАНИЕ: Не удалось определить количество звездочек/плюсов!")
+                        print(f"         X-Spam-Level: '{original_x_spam_level}'")
+                        print(f"         X-Spamd-Bar: '{x_spamd_bar}'")
+                    elif spamd_bar_plus_count == 1:
+                        print(f"      ⚠️ ВНИМАНИЕ: Найдена только 1 звездочка/плюс. Проверьте заголовки!")
                     
                     # Финальная проверка значения перед использованием
                     print(f"      ✅ ФИНАЛЬНАЯ ПРОВЕРКА: spamd_bar_plus_count = {spamd_bar_plus_count}, x_spamd_bar = '{x_spamd_bar}'")
