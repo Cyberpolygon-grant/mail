@@ -1397,7 +1397,7 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
     clear_spam_threshold_cache(target_email)
     
     # Ждем обработки rspamd
-    wait_time = max(wait_seconds, 15)  # Минимум 15 секунд
+    wait_time = max(wait_seconds, 20)  # Минимум 20 секунд для надежности
     print(f"   ⏳ Ожидание {wait_time} сек для обработки rspamd...")
     time.sleep(wait_time)
     
@@ -1510,120 +1510,143 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
             info["reason"] = "no_emails_in_inbox"
             return (False, info)  # При отсутствии писем сохраняем (fail-open)
         
-        # Берем последние письма (до 15 самых новых для надежности)
+        # Берем последние письма (до 20 самых новых для надежности)
         subject_lower = (subject or "").lower()
         msgid_clean = message_id.strip().strip('<>') if message_id else None
         
         print(f"   🔍 Ищем письмо: Message-ID={msgid_clean[:50] if msgid_clean else 'N/A'}, Subject={subject[:50] if subject else 'N/A'}")
-        print(f"   📧 Всего писем в INBOX: {len(email_ids)}, проверяем последние {min(15, len(email_ids))}")
+        print(f"   📧 Всего писем в INBOX: {len(email_ids)}, проверяем последние {min(20, len(email_ids))}")
         
         # ШАГ 1: СНАЧАЛА НАХОДИМ ПРАВИЛЬНОЕ ПИСЬМО (только Message-ID и Subject)
+        # Делаем несколько попыток поиска с небольшими задержками
         found_email_id = None
         found_raw_email = None
+        max_search_attempts = 3
+        search_delay = 3
         
-        for email_id in reversed(email_ids[-15:]):
-            try:
-                status, msg_data = mail.fetch(email_id, '(RFC822)')
+        for search_attempt in range(max_search_attempts):
+            if search_attempt > 0:
+                print(f"   🔄 Повторная попытка поиска письма ({search_attempt + 1}/{max_search_attempts})...")
+                time.sleep(search_delay)
+                # Обновляем список писем
+                status, messages = mail.search(None, 'ALL')
                 if status != 'OK':
-                    continue
-                
-                raw_email = msg_data[0][1]
-                
-                # Декодируем сырые данные
-                raw_str = None
+                    break
+                email_ids = messages[0].split()
+                if not email_ids:
+                    break
+            
+            for email_id in reversed(email_ids[-20:]):
                 try:
-                    for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
-                        try:
-                            raw_str = raw_email.decode(encoding, errors='ignore')
-                            break
-                        except:
-                            continue
-                except:
-                    continue
-                
-                if not raw_str:
-                    continue
-                
-                # Парсим ТОЛЬКО Message-ID и Subject для поиска
-                lines = raw_str.split('\n')
-                message_id_parts = []
-                subject_parts = []
-                in_message_id = False
-                in_subject = False
-                headers_end = False
-                
-                for line in lines:
-                    if not line.strip():
-                        if in_message_id or in_subject:
-                            in_message_id = False
-                            in_subject = False
-                        else:
-                            headers_end = True
+                    status, msg_data = mail.fetch(email_id, '(RFC822)')
+                    if status != 'OK':
                         continue
                     
-                    if headers_end:
-                        break
+                    raw_email = msg_data[0][1]
                     
-                    line_stripped = line.strip()
-                    line_lower = line_stripped.lower()
-                    
-                    # Message-ID
-                    if 'message-id' in line_lower and ':' in line_stripped:
-                        colon_idx = line_stripped.find(':')
-                        if colon_idx >= 0:
-                            value = line_stripped[colon_idx + 1:].strip()
-                            if value:
-                                message_id_parts.append(value)
-                            in_message_id = True
-                            in_subject = False
-                    # Subject
-                    elif 'subject' in line_lower and ':' in line_stripped:
-                        colon_idx = line_stripped.find(':')
-                        if colon_idx >= 0:
-                            value = line_stripped[colon_idx + 1:].strip()
-                            if value:
-                                subject_parts.append(value)
-                            in_subject = True
-                            in_message_id = False
-                    # Продолжение многострочного заголовка
-                    elif in_message_id or in_subject:
-                        if line.startswith(' ') or line.startswith('\t'):
-                            continuation = line.lstrip(' \t')
-                            if continuation:
-                                if in_message_id:
-                                    message_id_parts.append(continuation)
-                                elif in_subject:
-                                    subject_parts.append(continuation)
-                        else:
-                            in_message_id = False
-                            in_subject = False
-                
-                # Проверяем совпадение
-                msg_msgid = ''
-                msg_subject = ''
-                
-                if message_id_parts:
-                    msg_msgid = ''.join(message_id_parts).strip().strip('<>')
-                    if msgid_clean and msg_msgid == msgid_clean:
-                        found_email_id = email_id
-                        found_raw_email = raw_email
-                        print(f"      ✅ Найдено совпадение по Message-ID: {msg_msgid[:50]}")
-                        break
-                
-                if not found_email_id and subject_parts:
+                    # Декодируем сырые данные
+                    raw_str = None
                     try:
-                        msg_subject_raw = ''.join(subject_parts).strip()
-                        msg_subject = decode_mime_words(msg_subject_raw).lower()
-                        if subject and (subject_lower[:50] in msg_subject or msg_subject[:50] in subject_lower):
+                        for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
+                            try:
+                                raw_str = raw_email.decode(encoding, errors='ignore')
+                                break
+                            except:
+                                continue
+                    except:
+                        continue
+                    
+                    if not raw_str:
+                        continue
+                    
+                    # Парсим ТОЛЬКО Message-ID и Subject для поиска
+                    lines = raw_str.split('\n')
+                    message_id_parts = []
+                    subject_parts = []
+                    in_message_id = False
+                    in_subject = False
+                    headers_end = False
+                    
+                    for line in lines:
+                        if not line.strip():
+                            if in_message_id or in_subject:
+                                in_message_id = False
+                                in_subject = False
+                            else:
+                                headers_end = True
+                            continue
+                        
+                        if headers_end:
+                            break
+                        
+                        line_stripped = line.strip()
+                        line_lower = line_stripped.lower()
+                        
+                        # Message-ID
+                        if 'message-id' in line_lower and ':' in line_stripped:
+                            colon_idx = line_stripped.find(':')
+                            if colon_idx >= 0:
+                                value = line_stripped[colon_idx + 1:].strip()
+                                if value:
+                                    message_id_parts.append(value)
+                                in_message_id = True
+                                in_subject = False
+                        # Subject
+                        elif 'subject' in line_lower and ':' in line_stripped:
+                            colon_idx = line_stripped.find(':')
+                            if colon_idx >= 0:
+                                value = line_stripped[colon_idx + 1:].strip()
+                                if value:
+                                    subject_parts.append(value)
+                                in_subject = True
+                                in_message_id = False
+                        # Продолжение многострочного заголовка
+                        elif in_message_id or in_subject:
+                            if line.startswith(' ') or line.startswith('\t'):
+                                continuation = line.lstrip(' \t')
+                                if continuation:
+                                    if in_message_id:
+                                        message_id_parts.append(continuation)
+                                    elif in_subject:
+                                        subject_parts.append(continuation)
+                            else:
+                                in_message_id = False
+                                in_subject = False
+                    
+                    # Проверяем совпадение
+                    msg_msgid = ''
+                    msg_subject = ''
+                    
+                    if message_id_parts:
+                        msg_msgid = ''.join(message_id_parts).strip().strip('<>')
+                        if msgid_clean and msg_msgid == msgid_clean:
                             found_email_id = email_id
                             found_raw_email = raw_email
-                            print(f"      ✅ Найдено совпадение по Subject: {msg_subject[:50]}")
+                            print(f"      ✅ Найдено совпадение по Message-ID: {msg_msgid[:50]}")
                             break
-                    except:
-                        pass
-            except Exception as e:
-                print(f"      ⚠️ Ошибка при поиске письма: {e}")
-                continue
+                    
+                    if not found_email_id and subject_parts:
+                        try:
+                            msg_subject_raw = ''.join(subject_parts).strip()
+                            msg_subject = decode_mime_words(msg_subject_raw).lower()
+                            if subject and (subject_lower[:50] in msg_subject or msg_subject[:50] in subject_lower):
+                                found_email_id = email_id
+                                found_raw_email = raw_email
+                                print(f"      ✅ Найдено совпадение по Subject: {msg_subject[:50]}")
+                                break
+                        except:
+                            pass
+                    
+                    # Если нашли письмо, выходим из обоих циклов
+                    if found_email_id:
+                        break
+                except Exception as e:
+                    print(f"      ⚠️ Ошибка при поиске письма: {e}")
+                    continue
+            
+            # Если нашли письмо, выходим из цикла попыток
+            if found_email_id:
+                break
         
         # ШАГ 2: ЕСЛИ НАШЛИ ПИСЬМО - ПАРСИМ ЕГО ЗАГОЛОВКИ
         if found_email_id and found_raw_email:
@@ -1872,8 +1895,11 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
             info["reason"] = "x_spam_no_or_missing"
             return (False, info)
         
-        # Если не нашли письмо - сохраняем (fail-open)
-        print(f"   ⚠️  Письмо не найдено в INBOX, сохраняем (fail-open)")
+        # Если не нашли письмо после всех попыток
+        print(f"   ⚠️  Письмо не найдено в INBOX после {max_search_attempts} попыток поиска")
+        print(f"      Message-ID: {msgid_clean[:50] if msgid_clean else 'N/A'}")
+        print(f"      Subject: {subject[:50] if subject else 'N/A'}")
+        print(f"      Всего писем в INBOX: {len(email_ids)}")
         
         # Логируем уровень спама пользователя даже если письмо не найдено
         output_dir = Path(os.getenv('ATTACHMENTS_OUTPUT_DIR', '/app/sent_attachments'))
@@ -1881,10 +1907,10 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
         user_spam_threshold = user_spam_settings.get('spam_threshold') if user_spam_settings else None
         user_spam_enabled = user_spam_settings.get('spam_enabled') if user_spam_settings else None
         if user_spam_threshold is not None:
-            log_line = f"ПАРАМЕТРЫ СПАМА | Тема: {subject[:50]} | Письмо не найдено в INBOX | Уровень спама пользователя (spam_threshold): {user_spam_threshold} | Спам-фильтр включен (spam_enabled): {user_spam_enabled}"
+            log_line = f"ПАРАМЕТРЫ СПАМА | Тема: {subject[:50]} | Письмо не найдено в INBOX после {max_search_attempts} попыток | Уровень спама пользователя (spam_threshold): {user_spam_threshold} | Спам-фильтр включен (spam_enabled): {user_spam_enabled}"
             append_send_attachs_log_line(output_dir, log_line)
         
-        info["reason"] = "email_not_found_in_imap"
+        info["reason"] = f"email_not_found_in_imap_after_{max_search_attempts}_attempts"
         info["user_spam_threshold"] = user_spam_threshold
         info["user_spam_enabled"] = user_spam_enabled
         return (False, info)  # При отсутствии письма сохраняем (fail-open)
