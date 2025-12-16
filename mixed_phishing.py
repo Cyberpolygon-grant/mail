@@ -1392,6 +1392,10 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
         "x_spamd_bar": None,
     }
     
+    # Очищаем кэш настроек спам-фильтра перед проверкой для получения актуальных значений
+    # Это критично при изменении настроек фильтра
+    clear_spam_threshold_cache(target_email)
+    
     # Ждем обработки rspamd
     wait_time = max(wait_seconds, 15)  # Минимум 15 секунд
     print(f"   ⏳ Ожидание {wait_time} сек для обработки rspamd...")
@@ -1544,19 +1548,108 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                     x_spam_level = email_message.get('X-Spam-Level', '').strip()
                     
                     # Получаем X-Spamd-Bar - формат: "+++++++" (только плюсы подряд)
-                    # Простой и надежный способ через email_message.get()
-                    x_spamd_bar = email_message.get('X-Spamd-Bar', '').strip()
+                    # Оптимизированный алгоритм парсинга заголовка
+                    x_spamd_bar = ''
+                    x_spamd_bar_raw = None
                     
-                    # Подсчитываем количество '+' в X-Spamd-Bar
+                    # Способ 1: через email_message.get() - основной способ
+                    try:
+                        x_spamd_bar_raw = email_message.get('X-Spamd-Bar', '')
+                        if x_spamd_bar_raw:
+                            x_spamd_bar = str(x_spamd_bar_raw).strip()
+                    except Exception as e:
+                        print(f"      DEBUG: Ошибка получения X-Spamd-Bar через get(): {e}")
+                    
+                    # Способ 2: через прямой доступ к заголовкам (если get() не сработал)
+                    if not x_spamd_bar:
+                        try:
+                            # Пробуем получить через items() или _headers
+                            if hasattr(email_message, '_headers'):
+                                for header_name, header_value in email_message._headers:
+                                    if header_name.lower() == 'x-spamd-bar':
+                                        x_spamd_bar = str(header_value).strip()
+                                        break
+                            # Также пробуем через items()
+                            if not x_spamd_bar and hasattr(email_message, 'items'):
+                                for header_name, header_value in email_message.items():
+                                    if header_name.lower() == 'x-spamd-bar':
+                                        x_spamd_bar = str(header_value).strip()
+                                        break
+                        except Exception as e:
+                            print(f"      DEBUG: Ошибка получения через _headers/items(): {e}")
+                    
+                    # Способ 3: парсим из сырых данных (только если заголовок не найден)
+                    if not x_spamd_bar:
+                        try:
+                            # Пробуем разные кодировки для декодирования
+                            raw_str = None
+                            for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
+                                try:
+                                    raw_str = raw_email.decode(encoding, errors='ignore')
+                                    break
+                                except:
+                                    continue
+                            
+                            if raw_str:
+                                # Ищем заголовок в сырых данных (может быть многострочным)
+                                lines = raw_str.split('\n')
+                                x_spamd_bar_parts = []
+                                in_x_spamd_bar = False
+                                
+                                for line in lines:
+                                    if not line.strip():
+                                        break  # Конец заголовков
+                                    
+                                    line_lower = line.lower().strip()
+                                    # Проверяем начало заголовка (может быть с пробелами или табуляцией)
+                                    if 'x-spamd-bar' in line_lower and ':' in line:
+                                        # Начало заголовка
+                                        colon_idx = line.find(':')
+                                        if colon_idx >= 0:
+                                            value = line[colon_idx + 1:].strip()
+                                            if value:
+                                                x_spamd_bar_parts.append(value)
+                                        in_x_spamd_bar = True
+                                    elif in_x_spamd_bar and (line.startswith(' ') or line.startswith('\t')):
+                                        # Продолжение многострочного заголовка
+                                        x_spamd_bar_parts.append(line.strip())
+                                    elif in_x_spamd_bar:
+                                        # Конец заголовка
+                                        break
+                                
+                                if x_spamd_bar_parts:
+                                    x_spamd_bar = ''.join(x_spamd_bar_parts).strip()
+                                    print(f"      DEBUG: X-Spamd-Bar получен из сырых данных: '{x_spamd_bar}'")
+                        except Exception as e:
+                            print(f"      DEBUG: Ошибка парсинга из сырых данных: {e}")
+                    
+                    # Нормализуем заголовок: оставляем только плюсы и минусы (убираем пробелы и другие символы)
+                    if x_spamd_bar:
+                        # Оставляем только символы + и - из заголовка
+                        normalized_bar = ''.join(c for c in x_spamd_bar if c in '+-')
+                        if normalized_bar != x_spamd_bar:
+                            print(f"      DEBUG: Нормализация X-Spamd-Bar: '{x_spamd_bar}' → '{normalized_bar}'")
+                            x_spamd_bar = normalized_bar
+                    
+                    # Подсчитываем количество '+' в X-Spamd-Bar (только плюсы, минусы не считаем)
                     spamd_bar_plus_count = x_spamd_bar.count('+') if x_spamd_bar else 0
                     
-                    # Отладочный вывод для диагностики
-                    print(f"      DEBUG: X-Spamd-Bar сырое: {repr(email_message.get('X-Spamd-Bar', ''))}")
-                    print(f"      DEBUG: X-Spamd-Bar после strip(): '{x_spamd_bar}' (длина: {len(x_spamd_bar)})")
-                    print(f"      DEBUG: Количество '+' в строке: {spamd_bar_plus_count}")
-                    if x_spamd_bar and len(x_spamd_bar) <= 30:
-                        print(f"      DEBUG: Символы: {[c for c in x_spamd_bar]}")
-                        print(f"      DEBUG: Коды: {[ord(c) for c in x_spamd_bar]}")
+                    # Отладочный вывод для диагностики парсинга
+                    print(f"      🔍 ПАРСИНГ X-Spamd-Bar:")
+                    print(f"         - Через get(): {repr(x_spamd_bar_raw)}")
+                    print(f"         - Финальное значение: '{x_spamd_bar}' (длина: {len(x_spamd_bar) if x_spamd_bar else 0})")
+                    print(f"         - Количество '+' знаков: {spamd_bar_plus_count}")
+                    if x_spamd_bar:
+                        # Показываем детальную информацию о символах
+                        plus_count = x_spamd_bar.count('+')
+                        minus_count = x_spamd_bar.count('-')
+                        other_chars = [c for c in x_spamd_bar if c not in '+-']
+                        if other_chars:
+                            print(f"         - ⚠️ Обнаружены посторонние символы: {other_chars}")
+                        if len(x_spamd_bar) <= 50:
+                            print(f"         - Символы: {list(x_spamd_bar)}")
+                            print(f"         - Коды символов: {[ord(c) for c in x_spamd_bar]}")
+                        print(f"         - Статистика: {plus_count} плюсов, {minus_count} минусов")
                     
                     # Если не нашли или получили 0, пробуем X-Spam-Level
                     if not x_spamd_bar and x_spam_level:
@@ -1564,7 +1657,8 @@ def check_email_spam_after_send(target_email, subject, message_id=None, wait_sec
                         print(f"      DEBUG: X-Spamd-Bar пустой, использован X-Spam-Level: '{x_spam_level}' → {spamd_bar_plus_count} звездочек")
                     
                     # Получаем настройки спам-фильтра пользователя из базы данных
-                    user_spam_settings = get_user_spam_threshold_cached(target_email)
+                    # Кэш уже очищен в начале функции для актуальности данных
+                    user_spam_settings = get_user_spam_threshold(target_email)
                     user_spam_threshold = user_spam_settings.get('spam_threshold') if user_spam_settings else None
                     user_spam_enabled = user_spam_settings.get('spam_enabled') if user_spam_settings else None
                     
