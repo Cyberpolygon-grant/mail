@@ -25,7 +25,7 @@ services:
       default:
         ipv4_address: 192.168.203.53
 
-  # Core services
+
   phishing-demo:
     build: .
     restart: always
@@ -34,14 +34,11 @@ services:
       - SMTP_SERVER=front
       - SMTP_PORT=25
       - ATTACHMENTS_OUTPUT_DIR=/app/sent_attachments
-      # Путь к maildir для проверки спама через файловую систему
       - MAIL_DIR=/mailu/mail
       - MAIL_DOMAIN=financepro.ru
-      # Параметры IMAP для проверки спама
       - IMAP_SERVER=imap
       - IMAP_PORT=143
       - IMAP_PASSWORD=1q2w#E$R
-      # Часовой пояс: UTC+3 (Москва)
       - TZ=Europe/Moscow
     networks:
       - default
@@ -49,20 +46,9 @@ services:
       - front
       - imap
     volumes:
-      # Монтируем директорию с логами и вложениями на хост для доступа по SSH
-      # Файлы доступны на хосте по пути: /home/iux/mail/sent_attachments/
-      # Используется автоматизацией оператора (dbo_automation.py) и парсером логов (parse_send_attachs.py)
-      # REMOTE_ATTACHMENTS_DIR в dbo_automation.py: /home/iux/mail/sent_attachments
-      # remote_path в parse_send_attachs.py: /home/iux/mail/sent_attachments
-      # Логи: send_attachs.log (текстовый) и send_attachs_actions.jsonl (JSON)
-      # Для доступа по SSH: scp iux@10.18.2.6:/home/iux/mail/sent_attachments/send_attachs.log ./
       - "/home/iux/mail/sent_attachments:/app/sent_attachments"
-      # Монтируем maildir для проверки папки Spam
       - "/mailu/mail:/mailu/mail:ro"
-      # Монтируем data для прямого доступа к базе данных
       - "/mailu/data:/mailu/data:ro"
-    # Временное решение: запуск с правами root для записи в volume
-    # Для продакшена лучше исправить права на хосте: chmod 777 sent_attachments
     user: "0:0"
     logging:
       driver: json-file
@@ -134,7 +120,6 @@ services:
         max-size: "10m"
         max-file: "3"
     ports:
-      # Пробрасываем порты IMAP напрямую для прямого доступа (альтернатива front)
       - "0.0.0.0:1143:143"
       - "0.0.0.0:1993:993"
     volumes:
@@ -165,19 +150,6 @@ services:
       - "/mailu/overrides/postfix:/overrides:ro"
     depends_on:
       - front
-
-  # oletools отключен для упрощения
-  # oletools:
-  #   image: ${DOCKER_ORG:-ghcr.io/mailu}/${DOCKER_PREFIX:-}oletools:${MAILU_VERSION:-2024.06}
-  #   hostname: oletools
-  #   logging:
-  #     driver: json-file
-  #     options:
-  #       max-size: "10m"
-  #       max-file: "3"
-  #   restart: always
-  #   networks:
-  #     - oletools
 
   fts_attachments:
     image: apache/tika:latest-full
@@ -219,28 +191,6 @@ services:
     depends_on:
       - front
       - redis
-
-  # Optional services - антивирус отключен
-  # antivirus:
-  #   image: clamav/clamav-debian:1.4
-  #   restart: always
-  #   logging:
-  #     driver: json-file
-  #     options:
-  #       max-size: "10m"
-  #       max-file: "3"
-  #   networks:
-  #     - clamav
-  #   volumes:
-  #     - "/mailu/clamav:/var/lib/clamav"
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "kill -0 `cat /tmp/clamd.pid` && kill -0 `cat /tmp/freshclam.pid`"]
-  #     interval: 10s
-  #     timeout: 5s
-  #     retries: 3
-  #     start_period: 10s
-
-
 
   # Webmail
   webmail:
