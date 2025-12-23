@@ -47,7 +47,7 @@ mail/
 ### Требования
 
 - Docker и Docker Compose
-- Linux/WSL (протестировано на Kali Linux)
+- Linux
 - Python 3.11+
 - Минимум 4GB RAM
 
